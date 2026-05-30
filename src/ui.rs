@@ -129,17 +129,22 @@ pub fn render(
             .sum()
     };
 
-    let truncate_inline = |parts: &[TextSpan], max_width: usize| -> (Vec<TextSpan>, bool) {
-        let mut out = Vec::new();
+    let make_span = |marker: u8, text: String| -> TextSpan {
+        match marker {
+            0 => TextSpan::Normal(text),
+            1 => TextSpan::Bold(text),
+            2 => TextSpan::Italic(text),
+            3 => TextSpan::BoldItalic(text),
+            _ => TextSpan::InlineCode(text),
+        }
+    };
+
+    let wrap_spans = |parts: &[TextSpan], max_width: usize| -> Vec<Vec<TextSpan>> {
+        let mut lines = Vec::new();
+        let mut current = Vec::new();
         let mut used = 0usize;
-        let mut truncated = false;
 
         for part in parts {
-            if used >= max_width {
-                truncated = true;
-                break;
-            }
-
             let (text, marker) = match part {
                 TextSpan::Normal(text) => (text, 0),
                 TextSpan::Bold(text) => (text, 1),
@@ -148,31 +153,84 @@ pub fn render(
                 TextSpan::InlineCode(text) => (text, 4),
             };
 
-            let mut kept = String::new();
+            let mut chunk = String::new();
             for ch in text.chars() {
                 let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if used + ch_width > max_width {
-                    truncated = true;
-                    break;
+                if used + ch_width > max_width && used > 0 {
+                    if !chunk.is_empty() {
+                        current.push(make_span(marker, chunk));
+                        chunk = String::new();
+                    }
+                    lines.push(current);
+                    current = Vec::new();
+                    used = 0;
                 }
-                kept.push(ch);
+                chunk.push(ch);
                 used += ch_width;
             }
 
-            if !kept.is_empty() {
-                let span = match marker {
-                    0 => TextSpan::Normal(kept),
-                    1 => TextSpan::Bold(kept),
-                    2 => TextSpan::Italic(kept),
-                    3 => TextSpan::BoldItalic(kept),
-                    _ => TextSpan::InlineCode(kept),
-                };
-                out.push(span);
+            if !chunk.is_empty() {
+                current.push(make_span(marker, chunk));
             }
         }
 
-        (out, truncated)
+        if !current.is_empty() {
+            lines.push(current);
+        }
+
+        if lines.is_empty() {
+            lines.push(Vec::new());
+        }
+
+        lines
     };
+
+    let wrap_with_prefix = |spans: &[TextSpan], first_prefix: &str, cont_prefix: &str, max_width: usize| -> Vec<(String, Vec<TextSpan>)> {
+        let first_width = first_prefix.width();
+        let cont_width = cont_prefix.width();
+        let mut lines = Vec::new();
+        let mut current = Vec::new();
+        let mut used = first_width;
+        let mut is_first = true;
+
+        for part in spans {
+            let (text, marker) = match part {
+                TextSpan::Normal(text) => (text, 0),
+                TextSpan::Bold(text) => (text, 1),
+                TextSpan::Italic(text) => (text, 2),
+                TextSpan::BoldItalic(text) => (text, 3),
+                TextSpan::InlineCode(text) => (text, 4),
+            };
+
+            let mut chunk = String::new();
+            for ch in text.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + ch_width > max_width && used > if is_first { first_width } else { cont_width } {
+                    if !chunk.is_empty() {
+                        current.push(make_span(marker, chunk));
+                        chunk = String::new();
+                    }
+                    let prefix = if is_first { first_prefix } else { cont_prefix };
+                    lines.push((prefix.to_string(), current));
+                    current = Vec::new();
+                    is_first = false;
+                    used = cont_width;
+                }
+                chunk.push(ch);
+                used += ch_width;
+            }
+
+            if !chunk.is_empty() {
+                current.push(make_span(marker, chunk));
+            }
+        }
+
+        let prefix = if is_first { first_prefix } else { cont_prefix };
+        lines.push((prefix.to_string(), current));
+        lines
+    };
+
+    let max_line_width = inner_area.width as usize;
 
     for element in &slide.elements {
         match element {
@@ -196,23 +254,31 @@ pub fn render(
                     6 => "        ",
                     _ => "        ",
                 };
-                let mut line_spans = Vec::new();
-                if !indent.is_empty() {
-                    line_spans.push(Span::styled(indent, heading_style));
+                for (prefix, line_parts) in wrap_with_prefix(spans, indent, indent, max_line_width) {
+                    let mut line_spans = Vec::new();
+                    if !prefix.is_empty() {
+                        line_spans.push(Span::styled(prefix, heading_style));
+                    }
+                    line_spans.extend(build_rich_spans(&line_parts, heading_style));
+                    display_lines.push(Line::from(line_spans));
                 }
-                line_spans.extend(build_rich_spans(spans, heading_style));
-                display_lines.push(Line::from(line_spans));
                 display_lines.push(Line::default());
             }
 
             SlideElement::ListItem(spans) => {
-                let mut line_spans = vec![Span::styled("  • ", theme.list_style)];
-                line_spans.extend(build_rich_spans(spans, theme.paragraph_style));
-                display_lines.push(Line::from(line_spans));
+                let wrapped = wrap_with_prefix(spans, "  • ", "    ", max_line_width);
+                for (prefix, line_parts) in wrapped {
+                    let mut line_spans = Vec::new();
+                    line_spans.push(Span::styled(prefix, theme.list_style));
+                    line_spans.extend(build_rich_spans(&line_parts, theme.paragraph_style));
+                    display_lines.push(Line::from(line_spans));
+                }
             }
 
             SlideElement::Paragraph(spans) => {
-                display_lines.push(Line::from(build_rich_spans(spans, theme.paragraph_style)));
+                for line_parts in wrap_spans(spans, max_line_width) {
+                    display_lines.push(Line::from(build_rich_spans(&line_parts, theme.paragraph_style)));
+                }
             }
 
             SlideElement::CodeBlock(code) => {
@@ -227,8 +293,9 @@ pub fn render(
                         max_len = width;
                     }
                 }
-                // 确定代码框的动态物理总宽度（左右各预留安全空间，限制在 30~70 字符宽）
-                let box_width = (max_len + 4).max(30).min(70);
+                // 确定代码框的动态物理总宽度（左右各预留安全空间，限制在可视宽度内）
+                let max_box_width = max_line_width.saturating_sub(4).max(10);
+                let box_width = (max_len + 4).min(max_box_width).max(10);
 
                 // 画出代码块的字形天花板 ┌─────────────────┐
                 let top_border = format!("  ┌{}┐", "─".repeat(box_width - 2));
@@ -237,22 +304,19 @@ pub fn render(
                 // 逐行把代码填入方框，两侧用 │ 字符严密包裹，右侧自动用空格精准补齐
                 for code_line in code.lines() {
                     let spans = parse_inline(code_line);
-                    let (mut trimmed, truncated) = truncate_inline(&spans, box_width - 4);
-                    if truncated {
-                        trimmed.push(TextSpan::Normal("...".to_string()));
-                    }
+                    for line_parts in wrap_spans(&spans, box_width - 4) {
+                        let content_width = inline_width(&line_parts);
+                        let padding_size = (box_width - 4).saturating_sub(content_width);
 
-                    let content_width = inline_width(&trimmed);
-                    let padding_size = (box_width - 4).saturating_sub(content_width);
-
-                    let mut line_spans = Vec::new();
-                    line_spans.push(Span::styled("  │ ", theme.code_style));
-                    line_spans.extend(build_rich_spans(&trimmed, theme.code_style));
-                    if padding_size > 0 {
-                        line_spans.push(Span::styled(" ".repeat(padding_size), theme.code_style));
+                        let mut line_spans = Vec::new();
+                        line_spans.push(Span::styled("  │ ", theme.code_style));
+                        line_spans.extend(build_rich_spans(&line_parts, theme.code_style));
+                        if padding_size > 0 {
+                            line_spans.push(Span::styled(" ".repeat(padding_size), theme.code_style));
+                        }
+                        line_spans.push(Span::styled(" │", theme.code_style));
+                        display_lines.push(Line::from(line_spans));
                     }
-                    line_spans.push(Span::styled(" │", theme.code_style));
-                    display_lines.push(Line::from(line_spans));
                 }
 
                 // 画出代码块的字形地板 └─────────────────┘
