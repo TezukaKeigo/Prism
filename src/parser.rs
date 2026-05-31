@@ -10,6 +10,17 @@ pub enum TextSpan {
     InlineCode(String),
 }
 
+/// 行内文本容器接口（用于泛型收集器）
+pub trait InlineSpanCollector {
+    fn push_span(&mut self, span: TextSpan);
+}
+
+impl InlineSpanCollector for Vec<TextSpan> {
+    fn push_span(&mut self, span: TextSpan) {
+        self.push(span);
+    }
+}
+
 /// 幻灯片中的单一视觉元素枚举
 #[derive(Debug, Clone)]
 pub enum SlideElement {
@@ -127,7 +138,11 @@ impl Parser {
 }
 
 pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
-    let mut spans = Vec::new();
+    parse_inline_with::<Vec<TextSpan>>(text)
+}
+
+fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
+    let mut spans = C::default();
     let mut buffer = String::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -150,7 +165,7 @@ pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
                         if has_non_whitespace(inner) {
                             flush_normal(&mut spans, &mut buffer);
                             let content: String = inner.iter().collect();
-                            spans.push(TextSpan::InlineCode(content));
+                            spans.push_span(TextSpan::InlineCode(content));
                             i = end + 1;
                             continue;
                         }
@@ -171,8 +186,10 @@ pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
                         if has_non_whitespace(inner) {
                             flush_normal(&mut spans, &mut buffer);
                             let inner_text: String = inner.iter().collect();
-                            let inner_spans = parse_inline(&inner_text);
-                            spans.extend(apply_bold(inner_spans));
+                            let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
+                            for span in apply_bold(inner_spans) {
+                                spans.push_span(span);
+                            }
                             i = end + 2;
                             continue;
                         }
@@ -191,8 +208,10 @@ pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
                     if has_non_whitespace(inner) {
                         flush_normal(&mut spans, &mut buffer);
                         let inner_text: String = inner.iter().collect();
-                        let inner_spans = parse_inline(&inner_text);
-                        spans.extend(apply_italic(inner_spans));
+                        let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
+                        for span in apply_italic(inner_spans) {
+                            spans.push_span(span);
+                        }
                         i = end + 1;
                         continue;
                     }
@@ -290,8 +309,8 @@ fn apply_italic(spans: Vec<TextSpan>) -> Vec<TextSpan> {
         .collect()
 }
 
-fn flush_normal(spans: &mut Vec<TextSpan>, buffer: &mut String) {
+fn flush_normal<C: InlineSpanCollector>(spans: &mut C, buffer: &mut String) {
     if !buffer.is_empty() {
-        spans.push(TextSpan::Normal(std::mem::take(buffer)));
+        spans.push_span(TextSpan::Normal(std::mem::take(buffer)));
     }
 }
