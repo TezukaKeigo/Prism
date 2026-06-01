@@ -8,6 +8,8 @@ pub enum TextSpan {
     Italic(String),
     BoldItalic(String),
     InlineCode(String),
+    Link { text: String, url: String },
+    Image { alt: String, src: String },
 }
 
 /// 行内文本容器接口（用于泛型收集器）
@@ -40,6 +42,21 @@ pub enum SlideElement {
 #[derive(Debug, Clone)]
 pub struct Slide {
     pub elements: Vec<SlideElement>,
+}
+
+pub fn collect_slide_images(slide: &Slide) -> Vec<String> {
+    let mut images = Vec::new();
+    for element in &slide.elements {
+        match element {
+            SlideElement::Heading(_, spans)
+            | SlideElement::ListItem(spans)
+            | SlideElement::Paragraph(spans) => {
+                collect_images_from_spans(spans, &mut images);
+            }
+            SlideElement::CodeBlock(_) | SlideElement::EmptyLine => {}
+        }
+    }
+    images
 }
 
 /// Markdown 解析器
@@ -150,6 +167,43 @@ fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
     while i < chars.len() {
         let ch = chars[i];
 
+        if ch == '\\' {
+            if let Some(next) = chars.get(i + 1) {
+                if is_escaped_char(*next) {
+                    buffer.push(*next);
+                    i += 2;
+                    continue;
+                }
+            }
+            buffer.push('\\');
+            i += 1;
+            continue;
+        }
+
+        if ch == '!' {
+            if chars.get(i + 1) == Some(&'[') {
+                if let Some((alt, src, end)) = parse_link_like(&chars, i + 1) {
+                    if !src.is_empty() {
+                        flush_normal(&mut spans, &mut buffer);
+                        spans.push_span(TextSpan::Image { alt, src });
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if ch == '[' {
+            if let Some((text, url, end)) = parse_link_like(&chars, i) {
+                if !url.is_empty() {
+                    flush_normal(&mut spans, &mut buffer);
+                    spans.push_span(TextSpan::Link { text, url });
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+
         if ch == '`' {
             if i + 1 < chars.len() && chars[i + 1] == '`' {
                 buffer.push('`');
@@ -235,6 +289,10 @@ fn has_non_whitespace(chars: &[char]) -> bool {
     chars.iter().any(|ch| !ch.is_whitespace())
 }
 
+fn is_escaped_char(ch: char) -> bool {
+    matches!(ch, '*' | '`' | '[' | ']' | '(' | ')' | '!' | '_' | '\\')
+}
+
 fn is_single_backtick(chars: &[char], i: usize) -> bool {
     let prev = i.checked_sub(1).and_then(|idx| chars.get(idx));
     let next = chars.get(i + 1);
@@ -283,6 +341,54 @@ fn find_closing_backtick(chars: &[char], mut i: usize) -> Option<usize> {
     None
 }
 
+fn parse_link_like(chars: &[char], open_bracket: usize) -> Option<(String, String, usize)> {
+    let mut i = open_bracket + 1;
+    while i < chars.len() {
+        if chars[i] == ']' && !is_escaped(chars, i) {
+            break;
+        }
+        i += 1;
+    }
+    if i >= chars.len() || chars.get(i + 1) != Some(&'(') {
+        return None;
+    }
+    let text: String = chars[open_bracket + 1..i].iter().collect();
+
+    let mut j = i + 2;
+    while j < chars.len() {
+        if chars[j] == ')' && !is_escaped(chars, j) {
+            break;
+        }
+        j += 1;
+    }
+    if j >= chars.len() {
+        return None;
+    }
+
+    let url: String = chars[i + 2..j].iter().collect();
+    Some((text, url, j))
+}
+
+fn is_escaped(chars: &[char], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    let mut backslashes = 0;
+    let mut idx = i - 1;
+    loop {
+        if chars[idx] == '\\' {
+            backslashes += 1;
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
 fn apply_bold(spans: Vec<TextSpan>) -> Vec<TextSpan> {
     spans
         .into_iter()
@@ -292,6 +398,8 @@ fn apply_bold(spans: Vec<TextSpan>) -> Vec<TextSpan> {
             TextSpan::Bold(text) => TextSpan::Bold(text),
             TextSpan::BoldItalic(text) => TextSpan::BoldItalic(text),
             TextSpan::InlineCode(text) => TextSpan::InlineCode(text),
+            TextSpan::Link { text, url } => TextSpan::Link { text, url },
+            TextSpan::Image { alt, src } => TextSpan::Image { alt, src },
         })
         .collect()
 }
@@ -305,6 +413,8 @@ fn apply_italic(spans: Vec<TextSpan>) -> Vec<TextSpan> {
             TextSpan::Bold(text) => TextSpan::BoldItalic(text),
             TextSpan::BoldItalic(text) => TextSpan::BoldItalic(text),
             TextSpan::InlineCode(text) => TextSpan::InlineCode(text),
+            TextSpan::Link { text, url } => TextSpan::Link { text, url },
+            TextSpan::Image { alt, src } => TextSpan::Image { alt, src },
         })
         .collect()
 }
@@ -312,5 +422,23 @@ fn apply_italic(spans: Vec<TextSpan>) -> Vec<TextSpan> {
 fn flush_normal<C: InlineSpanCollector>(spans: &mut C, buffer: &mut String) {
     if !buffer.is_empty() {
         spans.push_span(TextSpan::Normal(std::mem::take(buffer)));
+    }
+}
+
+fn collect_images_from_spans(spans: &[TextSpan], images: &mut Vec<String>) {
+    for span in spans {
+        match span {
+            TextSpan::Image { alt: _, src } => {
+                if !src.is_empty() && !images.contains(src) {
+                    images.push(src.clone());
+                }
+            }
+            TextSpan::Link { .. }
+            | TextSpan::Normal(_)
+            | TextSpan::Bold(_)
+            | TextSpan::Italic(_)
+            | TextSpan::BoldItalic(_)
+            | TextSpan::InlineCode(_) => {}
+        }
     }
 }

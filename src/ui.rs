@@ -46,6 +46,29 @@ pub fn render(
     let mut display_lines = Vec::new();
     display_lines.push(Line::default()); // 顶部留白
 
+    let resolve_image_text = |alt: &str, src: &str| -> (String, bool) {
+        if src.is_empty() {
+            return (alt.to_string(), false);
+        }
+        if let Ok(root) = std::env::current_dir() {
+            let path = root.join(src);
+            if path.is_file() {
+                if alt.is_empty() {
+                    return (src.to_string(), false);
+                }
+                return (alt.to_string(), false);
+            }
+        }
+        (src.to_string(), true)
+    };
+
+    let resolve_link_text = |text: &str, url: &str| -> String {
+        if !url.is_empty() {
+            return url.to_string();
+        }
+        text.to_string()
+    };
+
     let build_rich_spans = |parts: &[TextSpan], base_style: Style| -> Vec<Span<'static>> {
         let mut out = Vec::new();
         for part in parts {
@@ -107,8 +130,36 @@ pub fn render(
                                         out.push(Span::styled(inner_text, code_base));
                                     }
                                 }
+                                TextSpan::Link { text, url: _ } => {
+                                    if !text.is_empty() {
+                                        out.push(Span::styled(text, code_base));
+                                    }
+                                }
+                                TextSpan::Image { alt, src } => {
+                                    let (label, _) = resolve_image_text(&alt, &src);
+                                    if !label.is_empty() {
+                                        out.push(Span::styled(label, code_base));
+                                    }
+                                }
                             }
                         }
+                    }
+                }
+                TextSpan::Link { text, url } => {
+                    let label = resolve_link_text(text, url);
+                    if !label.is_empty() {
+                        out.push(Span::styled(label, base_style));
+                    }
+                }
+                TextSpan::Image { alt, src } => {
+                    let (label, underline) = resolve_image_text(alt, src);
+                    if !label.is_empty() {
+                        let style = if underline {
+                            base_style.add_modifier(Modifier::UNDERLINED)
+                        } else {
+                            base_style
+                        };
+                        out.push(Span::styled(label, style));
                     }
                 }
             }
@@ -125,6 +176,8 @@ pub fn render(
                 | TextSpan::Italic(text)
                 | TextSpan::BoldItalic(text)
                 | TextSpan::InlineCode(text) => text.width(),
+                TextSpan::Link { text, url } => resolve_link_text(text, url).width(),
+                TextSpan::Image { alt, src } => resolve_image_text(alt, src).0.width(),
             })
             .sum()
     };
@@ -135,7 +188,8 @@ pub fn render(
             1 => TextSpan::Bold(text),
             2 => TextSpan::Italic(text),
             3 => TextSpan::BoldItalic(text),
-            _ => TextSpan::InlineCode(text),
+            4 => TextSpan::InlineCode(text),
+            _ => TextSpan::Link { text, url: String::new() },
         }
     };
 
@@ -146,11 +200,20 @@ pub fn render(
 
         for part in parts {
             let (text, marker) = match part {
-                TextSpan::Normal(text) => (text, 0),
-                TextSpan::Bold(text) => (text, 1),
-                TextSpan::Italic(text) => (text, 2),
-                TextSpan::BoldItalic(text) => (text, 3),
-                TextSpan::InlineCode(text) => (text, 4),
+                TextSpan::Normal(text) => (text.clone(), 0),
+                TextSpan::Bold(text) => (text.clone(), 1),
+                TextSpan::Italic(text) => (text.clone(), 2),
+                TextSpan::BoldItalic(text) => (text.clone(), 3),
+                TextSpan::InlineCode(text) => (text.clone(), 4),
+                TextSpan::Link { text, url } => (resolve_link_text(text, url), 0),
+                TextSpan::Image { alt, src } => {
+                    let (label, underline) = resolve_image_text(alt, src);
+                    if underline {
+                        (label, 5)
+                    } else {
+                        (label, 0)
+                    }
+                }
             };
 
             let mut chunk = String::new();
@@ -195,11 +258,20 @@ pub fn render(
 
         for part in spans {
             let (text, marker) = match part {
-                TextSpan::Normal(text) => (text, 0),
-                TextSpan::Bold(text) => (text, 1),
-                TextSpan::Italic(text) => (text, 2),
-                TextSpan::BoldItalic(text) => (text, 3),
-                TextSpan::InlineCode(text) => (text, 4),
+                TextSpan::Normal(text) => (text.clone(), 0),
+                TextSpan::Bold(text) => (text.clone(), 1),
+                TextSpan::Italic(text) => (text.clone(), 2),
+                TextSpan::BoldItalic(text) => (text.clone(), 3),
+                TextSpan::InlineCode(text) => (text.clone(), 4),
+                TextSpan::Link { text, url } => (resolve_link_text(text, url), 0),
+                TextSpan::Image { alt, src } => {
+                    let (label, underline) = resolve_image_text(alt, src);
+                    if underline {
+                        (label, 5)
+                    } else {
+                        (label, 0)
+                    }
+                }
             };
 
             let mut chunk = String::new();

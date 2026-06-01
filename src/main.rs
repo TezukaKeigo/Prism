@@ -6,6 +6,7 @@ mod ui;
 
 use std::fs;
 use std::time::Duration;
+use std::process::Command;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -15,7 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::config::Config;
 use crate::error::{PrismError, Result};
-use crate::parser::Parser;
+use crate::parser::{Parser, collect_slide_images};
 use crate::theme::ThemeStyles;
 
 fn main() {
@@ -79,12 +80,38 @@ fn run() -> Result<()> {
                                 current_page -= 1;
                             }
                         }
+                        // 按 O 打开当前页图片（若存在）
+                        KeyCode::Char('o') | KeyCode::Char('O') => {
+                            let images = collect_slide_images(&slides[current_page]);
+                            if let Some(path) = images.first() {
+                                open_image(path)?;
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
     }
+
+    Ok(())
+}
+
+fn open_image(path: &str) -> Result<()> {
+    let full_path = std::env::current_dir()
+        .map_err(|e| PrismError::IoError(e))?
+        .join(path);
+    if !full_path.exists() {
+        return Err(PrismError::IoError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("图片不存在: {}", full_path.display()),
+        )));
+    }
+
+    Command::new("cmd")
+        .args(["/C", "start", "", &full_path.to_string_lossy()])
+        .spawn()
+        .map_err(|e| PrismError::IoError(e))?;
 
     Ok(())
 }
