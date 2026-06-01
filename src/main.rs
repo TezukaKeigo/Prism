@@ -18,37 +18,33 @@ use crate::error::{PrismError, Result};
 use crate::parser::Parser;
 use crate::theme::ThemeStyles;
 
-fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("{}", err);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     // 1. 解析命令行参数（如果文件不存在，这里会直接拦截并报错）
-    let config = match Config::parse_args() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
+    let config = Config::parse_args()?;
 
     // 2. 读取并解析 Markdown 文件内容
     let content = fs::read_to_string(&config.file_path)?;
-    let slides = match Parser::parse(&content) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-    
+    let slides = Parser::parse(&content)?;
+
     let total_pages = slides.len();
     let theme_styles = ThemeStyles::new(&config.theme);
 
     // 3. 初始化终端，进入全屏原始模式
-    enable_raw_mode()?;
+    enable_raw_mode().map_err(|e| PrismError::TerminalError(e.to_string()))?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    
+    execute!(stdout, EnterAlternateScreen).map_err(|e| PrismError::TerminalError(e.to_string()))?;
+    let _guard = TerminalGuard;
+
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal = Terminal::new(backend).map_err(|e| PrismError::TerminalError(e.to_string()))?;
+    terminal.clear().map_err(|e| PrismError::TerminalError(e.to_string()))?;
 
     // 4. 播放主循环
     let mut current_page = 0;
@@ -56,12 +52,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     while !should_quit {
         // 将当前页数据、主题、页码传入 UI 模块
-        terminal.draw(|f| {
-            ui::render(f, &slides[current_page], &theme_styles, current_page, total_pages);
-        })?;
+        terminal
+            .draw(|f| {
+                ui::render(f, &slides[current_page], &theme_styles, current_page, total_pages);
+            })
+            .map_err(|e| PrismError::TerminalError(e.to_string()))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(Duration::from_millis(100)).map_err(|e| PrismError::TerminalError(e.to_string()))? {
+            if let Event::Key(key) = event::read().map_err(|e| PrismError::TerminalError(e.to_string()))? {
                 // 仅响应按下事件，过滤释放事件，防止部分终端双击触发
                 if key.kind == event::KeyEventKind::Press {
                     match key.code {
@@ -88,10 +86,15 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 5. 程序退出时，必须无条件还原终端状态，否则会导致用户终端卡死或乱码
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
     Ok(())
+}
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = std::io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen);
+    }
 }
