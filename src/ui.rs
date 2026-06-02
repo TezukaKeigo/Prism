@@ -9,6 +9,247 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::parser::{Slide, SlideElement, TextSpan, parse_inline};
 use crate::theme::ThemeStyles;
 
+// ═══════════════════════════════════════════════════════════════
+// 排版与渲染辅助类型/函数（从 render() 闭包中提取）
+// ═══════════════════════════════════════════════════════════════
+
+/// 行内片段种类 — 替代魔术数字 0-5，在换行处理中保留样式信息
+#[derive(Clone)]
+enum SpanKind {
+    Normal,
+    Bold,
+    Italic,
+    BoldItalic,
+    InlineCode,
+    Underline,
+}
+
+/// 解析图片标签与可用性：返回 (显示文本, 是否应加下划线)
+fn resolve_image_text(alt: &str, src: &str) -> (String, bool) {
+    if src.is_empty() {
+        return (alt.to_string(), false);
+    }
+    if let Ok(root) = std::env::current_dir() {
+        let path = root.join(src);
+        if path.is_file() {
+            if alt.is_empty() {
+                return (src.to_string(), false);
+            }
+            return (alt.to_string(), false);
+        }
+    }
+    (src.to_string(), true)
+}
+
+/// 解析链接显示文本：有 url 则显示 url，否则显示原始文字
+fn resolve_link_text(text: &str, url: &str) -> String {
+    if !url.is_empty() {
+        return url.to_string();
+    }
+    text.to_string()
+}
+
+/// 将 TextSpan 统一提取为 (SpanKind, String)，供换行函数使用
+fn span_to_kind_and_text(span: &TextSpan) -> (SpanKind, String) {
+    match span {
+        TextSpan::Normal(text) => (SpanKind::Normal, text.clone()),
+        TextSpan::Bold(text) => (SpanKind::Bold, text.clone()),
+        TextSpan::Italic(text) => (SpanKind::Italic, text.clone()),
+        TextSpan::BoldItalic(text) => (SpanKind::BoldItalic, text.clone()),
+        TextSpan::InlineCode(text) => (SpanKind::InlineCode, text.clone()),
+        TextSpan::Link { text, url } => {
+            let label = resolve_link_text(text, url);
+            (SpanKind::Normal, label)
+        }
+        TextSpan::Image { alt, src } => {
+            let (label, underline) = resolve_image_text(alt, src);
+            if underline {
+                (SpanKind::Underline, label)
+            } else {
+                (SpanKind::Normal, label)
+            }
+        }
+    }
+}
+
+/// 计算一组已分类文本片段的 Unicode 显示总宽度
+fn inline_width(parts: &[(SpanKind, String)]) -> usize {
+    parts.iter().map(|(_, text)| text.width()).sum()
+}
+
+/// 从 (SpanKind, String) 片段构建 ratatui Span 列表
+fn build_rich_spans(parts: &[(SpanKind, String)], base_style: Style) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    for (kind, text) in parts {
+        if text.is_empty() {
+            continue;
+        }
+        match kind {
+            SpanKind::Normal => {
+                out.push(Span::styled(text.clone(), base_style));
+            }
+            SpanKind::Bold => {
+                out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::BOLD)));
+            }
+            SpanKind::Italic => {
+                out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::ITALIC)));
+            }
+            SpanKind::BoldItalic => {
+                out.push(Span::styled(
+                    text.clone(),
+                    base_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                ));
+            }
+            SpanKind::InlineCode => {
+                let code_base = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
+                let inner_parts = parse_inline(text);
+                for inner in inner_parts {
+                    match inner {
+                        TextSpan::Normal(inner_text) => {
+                            if !inner_text.is_empty() {
+                                out.push(Span::styled(inner_text, code_base));
+                            }
+                        }
+                        TextSpan::Bold(inner_text) => {
+                            if !inner_text.is_empty() {
+                                out.push(Span::styled(
+                                    inner_text,
+                                    code_base.add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                        }
+                        TextSpan::Italic(inner_text) => {
+                            if !inner_text.is_empty() {
+                                out.push(Span::styled(
+                                    inner_text,
+                                    code_base.add_modifier(Modifier::ITALIC),
+                                ));
+                            }
+                        }
+                        TextSpan::BoldItalic(inner_text) => {
+                            if !inner_text.is_empty() {
+                                out.push(Span::styled(
+                                    inner_text,
+                                    code_base.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                                ));
+                            }
+                        }
+                        TextSpan::InlineCode(inner_text) => {
+                            if !inner_text.is_empty() {
+                                out.push(Span::styled(inner_text, code_base));
+                            }
+                        }
+                        TextSpan::Link { text: link_text, .. } => {
+                            if !link_text.is_empty() {
+                                out.push(Span::styled(link_text, code_base));
+                            }
+                        }
+                        TextSpan::Image { alt, src } => {
+                            let (label, _underline) = resolve_image_text(&alt, &src);
+                            if !label.is_empty() {
+                                out.push(Span::styled(label, code_base));
+                            }
+                        }
+                    }
+                }
+            }
+            SpanKind::Underline => {
+                out.push(Span::styled(
+                    text.clone(),
+                    base_style.add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// 行内文本换行：将 TextSpan 切片按 max_width 换行，返回 (SpanKind, String) 以保留样式
+fn wrap_spans(parts: &[TextSpan], max_width: usize) -> Vec<Vec<(SpanKind, String)>> {
+    let mut lines: Vec<Vec<(SpanKind, String)>> = Vec::new();
+    let mut current: Vec<(SpanKind, String)> = Vec::new();
+    let mut used = 0usize;
+
+    for part in parts {
+        let (kind, text) = span_to_kind_and_text(part);
+
+        let mut chunk = String::new();
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + ch_width > max_width && used > 0 {
+                if !chunk.is_empty() {
+                    current.push((kind.clone(), std::mem::take(&mut chunk)));
+                }
+                lines.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            chunk.push(ch);
+            used += ch_width;
+        }
+
+        if !chunk.is_empty() {
+            current.push((kind, chunk));
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+
+    lines
+}
+
+/// 带前缀的行内文本换行：首行用 first_prefix，续行用 cont_prefix
+fn wrap_with_prefix(
+    spans: &[TextSpan],
+    first_prefix: &str,
+    cont_prefix: &str,
+    max_width: usize,
+) -> Vec<(String, Vec<(SpanKind, String)>)> {
+    let first_width = first_prefix.width();
+    let cont_width = cont_prefix.width();
+    let mut lines: Vec<(String, Vec<(SpanKind, String)>)> = Vec::new();
+    let mut current: Vec<(SpanKind, String)> = Vec::new();
+    let mut used = first_width;
+    let mut is_first = true;
+
+    for part in spans {
+        let (kind, text) = span_to_kind_and_text(part);
+
+        let mut chunk = String::new();
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + ch_width > max_width
+                && used > if is_first { first_width } else { cont_width }
+            {
+                if !chunk.is_empty() {
+                    current.push((kind.clone(), std::mem::take(&mut chunk)));
+                }
+                let prefix = if is_first { first_prefix } else { cont_prefix };
+                lines.push((prefix.to_string(), std::mem::take(&mut current)));
+                is_first = false;
+                used = cont_width;
+            }
+            chunk.push(ch);
+            used += ch_width;
+        }
+
+        if !chunk.is_empty() {
+            current.push((kind, chunk));
+        }
+    }
+
+    let prefix = if is_first { first_prefix } else { cont_prefix };
+    lines.push((prefix.to_string(), current));
+    lines
+}
+
+// ═══════════════════════════════════════════════════════════════
+
 /// TUI 视觉渲染中心总入口
 pub fn render(
     f: &mut Frame, 
@@ -42,284 +283,23 @@ pub fn render(
     let inner_area = main_block.inner(chunks[0]);
     f.render_widget(main_block, chunks[0]);
 
-    // 4. 【升级版排版控制中心】
+    // 4. 排版控制：逐元素构建 display_lines
     let mut display_lines = Vec::new();
     display_lines.push(Line::default()); // 顶部留白
-
-    let resolve_image_text = |alt: &str, src: &str| -> (String, bool) {
-        if src.is_empty() {
-            return (alt.to_string(), false);
-        }
-        if let Ok(root) = std::env::current_dir() {
-            let path = root.join(src);
-            if path.is_file() {
-                if alt.is_empty() {
-                    return (src.to_string(), false);
-                }
-                return (alt.to_string(), false);
-            }
-        }
-        (src.to_string(), true)
-    };
-
-    let resolve_link_text = |text: &str, url: &str| -> String {
-        if !url.is_empty() {
-            return url.to_string();
-        }
-        text.to_string()
-    };
-
-    let build_rich_spans = |parts: &[TextSpan], base_style: Style| -> Vec<Span<'static>> {
-        let mut out = Vec::new();
-        for part in parts {
-            match part {
-                TextSpan::Normal(text) => {
-                    if !text.is_empty() {
-                        out.push(Span::styled(text.clone(), base_style));
-                    }
-                }
-                TextSpan::Bold(text) => {
-                    if !text.is_empty() {
-                        out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::BOLD)));
-                    }
-                }
-                TextSpan::Italic(text) => {
-                    if !text.is_empty() {
-                        out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::ITALIC)));
-                    }
-                }
-                TextSpan::BoldItalic(text) => {
-                    if !text.is_empty() {
-                        out.push(Span::styled(
-                            text.clone(),
-                            base_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                        ));
-                    }
-                }
-                TextSpan::InlineCode(text) => {
-                    if !text.is_empty() {
-                        let code_base = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
-                        let inner_parts = parse_inline(text);
-                        for inner in inner_parts {
-                            match inner {
-                                TextSpan::Normal(inner_text) => {
-                                    if !inner_text.is_empty() {
-                                        out.push(Span::styled(inner_text, code_base));
-                                    }
-                                }
-                                TextSpan::Bold(inner_text) => {
-                                    if !inner_text.is_empty() {
-                                        out.push(Span::styled(inner_text, code_base.add_modifier(Modifier::BOLD)));
-                                    }
-                                }
-                                TextSpan::Italic(inner_text) => {
-                                    if !inner_text.is_empty() {
-                                        out.push(Span::styled(inner_text, code_base.add_modifier(Modifier::ITALIC)));
-                                    }
-                                }
-                                TextSpan::BoldItalic(inner_text) => {
-                                    if !inner_text.is_empty() {
-                                        out.push(Span::styled(
-                                            inner_text,
-                                            code_base.add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                                        ));
-                                    }
-                                }
-                                TextSpan::InlineCode(inner_text) => {
-                                    if !inner_text.is_empty() {
-                                        out.push(Span::styled(inner_text, code_base));
-                                    }
-                                }
-                                TextSpan::Link { text, url: _ } => {
-                                    if !text.is_empty() {
-                                        out.push(Span::styled(text, code_base));
-                                    }
-                                }
-                                TextSpan::Image { alt, src } => {
-                                    let (label, _) = resolve_image_text(&alt, &src);
-                                    if !label.is_empty() {
-                                        out.push(Span::styled(label, code_base));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                TextSpan::Link { text, url } => {
-                    let label = resolve_link_text(text, url);
-                    if !label.is_empty() {
-                        out.push(Span::styled(label, base_style));
-                    }
-                }
-                TextSpan::Image { alt, src } => {
-                    let (label, underline) = resolve_image_text(alt, src);
-                    if !label.is_empty() {
-                        let style = if underline {
-                            base_style.add_modifier(Modifier::UNDERLINED)
-                        } else {
-                            base_style
-                        };
-                        out.push(Span::styled(label, style));
-                    }
-                }
-            }
-        }
-        out
-    };
-
-    let inline_width = |parts: &[TextSpan]| -> usize {
-        parts
-            .iter()
-            .map(|span| match span {
-                TextSpan::Normal(text)
-                | TextSpan::Bold(text)
-                | TextSpan::Italic(text)
-                | TextSpan::BoldItalic(text)
-                | TextSpan::InlineCode(text) => text.width(),
-                TextSpan::Link { text, url } => resolve_link_text(text, url).width(),
-                TextSpan::Image { alt, src } => resolve_image_text(alt, src).0.width(),
-            })
-            .sum()
-    };
-
-    let make_span = |marker: u8, text: String| -> TextSpan {
-        match marker {
-            0 => TextSpan::Normal(text),
-            1 => TextSpan::Bold(text),
-            2 => TextSpan::Italic(text),
-            3 => TextSpan::BoldItalic(text),
-            4 => TextSpan::InlineCode(text),
-            _ => TextSpan::Link { text, url: String::new() },
-        }
-    };
-
-    let wrap_spans = |parts: &[TextSpan], max_width: usize| -> Vec<Vec<TextSpan>> {
-        let mut lines = Vec::new();
-        let mut current = Vec::new();
-        let mut used = 0usize;
-
-        for part in parts {
-            let (text, marker) = match part {
-                TextSpan::Normal(text) => (text.clone(), 0),
-                TextSpan::Bold(text) => (text.clone(), 1),
-                TextSpan::Italic(text) => (text.clone(), 2),
-                TextSpan::BoldItalic(text) => (text.clone(), 3),
-                TextSpan::InlineCode(text) => (text.clone(), 4),
-                TextSpan::Link { text, url } => (resolve_link_text(text, url), 0),
-                TextSpan::Image { alt, src } => {
-                    let (label, underline) = resolve_image_text(alt, src);
-                    if underline {
-                        (label, 5)
-                    } else {
-                        (label, 0)
-                    }
-                }
-            };
-
-            let mut chunk = String::new();
-            for ch in text.chars() {
-                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if used + ch_width > max_width && used > 0 {
-                    if !chunk.is_empty() {
-                        current.push(make_span(marker, chunk));
-                        chunk = String::new();
-                    }
-                    lines.push(current);
-                    current = Vec::new();
-                    used = 0;
-                }
-                chunk.push(ch);
-                used += ch_width;
-            }
-
-            if !chunk.is_empty() {
-                current.push(make_span(marker, chunk));
-            }
-        }
-
-        if !current.is_empty() {
-            lines.push(current);
-        }
-
-        if lines.is_empty() {
-            lines.push(Vec::new());
-        }
-
-        lines
-    };
-
-    let wrap_with_prefix = |spans: &[TextSpan], first_prefix: &str, cont_prefix: &str, max_width: usize| -> Vec<(String, Vec<TextSpan>)> {
-        let first_width = first_prefix.width();
-        let cont_width = cont_prefix.width();
-        let mut lines = Vec::new();
-        let mut current = Vec::new();
-        let mut used = first_width;
-        let mut is_first = true;
-
-        for part in spans {
-            let (text, marker) = match part {
-                TextSpan::Normal(text) => (text.clone(), 0),
-                TextSpan::Bold(text) => (text.clone(), 1),
-                TextSpan::Italic(text) => (text.clone(), 2),
-                TextSpan::BoldItalic(text) => (text.clone(), 3),
-                TextSpan::InlineCode(text) => (text.clone(), 4),
-                TextSpan::Link { text, url } => (resolve_link_text(text, url), 0),
-                TextSpan::Image { alt, src } => {
-                    let (label, underline) = resolve_image_text(alt, src);
-                    if underline {
-                        (label, 5)
-                    } else {
-                        (label, 0)
-                    }
-                }
-            };
-
-            let mut chunk = String::new();
-            for ch in text.chars() {
-                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if used + ch_width > max_width && used > if is_first { first_width } else { cont_width } {
-                    if !chunk.is_empty() {
-                        current.push(make_span(marker, chunk));
-                        chunk = String::new();
-                    }
-                    let prefix = if is_first { first_prefix } else { cont_prefix };
-                    lines.push((prefix.to_string(), current));
-                    current = Vec::new();
-                    is_first = false;
-                    used = cont_width;
-                }
-                chunk.push(ch);
-                used += ch_width;
-            }
-
-            if !chunk.is_empty() {
-                current.push(make_span(marker, chunk));
-            }
-        }
-
-        let prefix = if is_first { first_prefix } else { cont_prefix };
-        lines.push((prefix.to_string(), current));
-        lines
-    };
 
     let max_line_width = inner_area.width as usize;
 
     for element in &slide.elements {
         match element {
-            // 利用 match 拉开多级标题的视觉层级
             SlideElement::Heading(level, spans) => {
                 let heading_style = match level {
                     1 => theme.heading_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
                     2 => theme.heading_style.add_modifier(Modifier::BOLD),
-                    3 => theme.heading_style,
-                    4 => theme.heading_style,
-                    5 => theme.heading_style,
-                    6 => theme.heading_style,
+                    3..=6 => theme.heading_style,
                     _ => theme.heading_style,
                 };
                 let indent = match level {
-                    1 => "",
-                    2 => "",
+                    1 | 2 => "",
                     3 => "  ",
                     4 => "    ",
                     5 => "      ",
@@ -349,31 +329,24 @@ pub fn render(
 
             SlideElement::Paragraph(spans) => {
                 for line_parts in wrap_spans(spans, max_line_width) {
-                    display_lines.push(Line::from(build_rich_spans(&line_parts, theme.paragraph_style)));
+                    display_lines
+                        .push(Line::from(build_rich_spans(&line_parts, theme.paragraph_style)));
                 }
             }
 
             SlideElement::CodeBlock(code) => {
                 display_lines.push(Line::default());
 
-                // 平滑扫描当前代码块，动态计算出最长的一行有多少个字符
-                let mut max_len = 0;
-                for line in code.lines() {
-                    let spans = parse_inline(line);
-                    let width = inline_width(&spans);
-                    if width > max_len {
-                        max_len = width;
-                    }
-                }
-                // 确定代码框的动态物理总宽度（左右各预留安全空间，限制在可视宽度内）
+                // 基于原始行宽计算代码框宽度（取最长行）
+                let max_len = code.lines().map(|l| l.width()).max().unwrap_or(0);
                 let max_box_width = max_line_width.saturating_sub(4).max(10);
                 let box_width = (max_len + 4).min(max_box_width).max(10);
 
-                // 画出代码块的字形天花板 ┌─────────────────┐
+                // 代码框天花板 ┌──────────┐
                 let top_border = format!("  ┌{}┐", "─".repeat(box_width - 2));
                 display_lines.push(Line::from(Span::styled(top_border, theme.code_style)));
 
-                // 逐行把代码填入方框，两侧用 │ 字符严密包裹，右侧自动用空格精准补齐
+                // 逐行填入，两侧 │ 包裹，右侧空格补齐
                 for code_line in code.lines() {
                     let spans = parse_inline(code_line);
                     for line_parts in wrap_spans(&spans, box_width - 4) {
@@ -384,14 +357,17 @@ pub fn render(
                         line_spans.push(Span::styled("  │ ", theme.code_style));
                         line_spans.extend(build_rich_spans(&line_parts, theme.code_style));
                         if padding_size > 0 {
-                            line_spans.push(Span::styled(" ".repeat(padding_size), theme.code_style));
+                            line_spans.push(Span::styled(
+                                " ".repeat(padding_size),
+                                theme.code_style,
+                            ));
                         }
                         line_spans.push(Span::styled(" │", theme.code_style));
                         display_lines.push(Line::from(line_spans));
                     }
                 }
 
-                // 画出代码块的字形地板 └─────────────────┘
+                // 代码框地板 └──────────┘
                 let bottom_border = format!("  └{}┘", "─".repeat(box_width - 2));
                 display_lines.push(Line::from(Span::styled(bottom_border, theme.code_style)));
 
@@ -431,7 +407,7 @@ pub fn render(
 
     let status_line = Line::from(Span::styled(
         status_string,
-        Style::default().fg(theme.border_color).bg(theme.bg_color)
+        Style::default().fg(theme.border_color).bg(theme.bg_color),
     ));
 
     f.render_widget(

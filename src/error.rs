@@ -8,7 +8,7 @@ pub enum PrismError {
     /// 命令行参数解析错误
     ConfigError(String),
     /// Markdown 语法错误（eg：文件内容为空）
-    ParseError(String),
+    ParseError { line: usize, message: String },
     /// 终端渲染交互期间发生的底层错误
     TerminalError(String),
 }
@@ -19,7 +19,13 @@ impl fmt::Display for PrismError {
         match self {
             PrismError::IoError(e) => write!(f, "文件读取失败: {e}"),
             PrismError::ConfigError(msg) => write!(f, "配置参数有误: {msg}"),
-            PrismError::ParseError(msg) => write!(f, "Markdown 解析异常: {msg}"),
+            PrismError::ParseError { line, message } => {
+                if *line > 0 {
+                    write!(f, "Markdown 解析异常 (第 {line} 行): {message}")
+                } else {
+                    write!(f, "Markdown 解析异常: {message}")
+                }
+            }
             PrismError::TerminalError(msg) => write!(f, "终端渲染失败: {msg}"),
         }
     }
