@@ -252,11 +252,12 @@ fn wrap_with_prefix(
 
 /// TUI 视觉渲染中心总入口
 pub fn render(
-    f: &mut Frame, 
-    slide: &Slide, 
-    theme: &ThemeStyles, 
-    current_page: usize, 
-    total_pages: usize
+    f: &mut Frame,
+    slide: &Slide,
+    theme: &ThemeStyles,
+    current_page: usize,
+    total_pages: usize,
+    goto_input: Option<&str>,
 ) {
     // 1. 铺满整屏背景色
     let full_area = f.size();
@@ -383,26 +384,35 @@ pub fn render(
     let content_paragraph = Paragraph::new(display_lines);
     f.render_widget(content_paragraph, inner_area);
 
-    // 5. 渲染底部状态栏进度条
-    let progress = (current_page + 1) as f32 / total_pages as f32;
-    let bar_width = 25;
-    let filled_width = (progress * bar_width as f32).round() as usize;
-
-    let filled_bar = "█".repeat(filled_width);
-    let empty_bar = "░".repeat(bar_width - filled_width);
-
-    let progress_part = format!(
-        " 进度: [{}{}] {:>3}%",
-        filled_bar,
-        empty_bar,
-        (progress * 100.0) as usize
-    );
-    let tips_part = "   |  操作提示: [←] 上一页  [→] 下一页  [Q/ESC] 退出播放";
-    let full_status = format!("{}{}", progress_part, tips_part);
-    let status_string = if full_status.width() > full_area.width as usize {
-        progress_part
+    // 5. 渲染底部状态栏（跳转模式覆盖常规提示）
+    let status_string = if let Some(input) = goto_input {
+        let prompt = if input.is_empty() {
+            " 跳转到: _  (输入页码后按 Enter，Esc 取消)".to_string()
+        } else {
+            format!(" 跳转到: {}_  (Enter 确认，Esc 取消)", input)
+        };
+        prompt
     } else {
-        full_status
+        let progress = (current_page + 1) as f32 / total_pages as f32;
+        let bar_width = 25;
+        let filled_width = (progress * bar_width as f32).round() as usize;
+
+        let filled_bar = "█".repeat(filled_width);
+        let empty_bar = "░".repeat(bar_width - filled_width);
+
+        let progress_part = format!(
+            " 进度: [{}{}] {:>3}%",
+            filled_bar,
+            empty_bar,
+            (progress * 100.0) as usize
+        );
+        let tips_part = "   |  操作提示: [←] 上一页  [→] 下一页  [G] 跳转页  [Q/ESC] 退出播放";
+        let full_status = format!("{}{}", progress_part, tips_part);
+        if full_status.width() > full_area.width as usize {
+            progress_part
+        } else {
+            full_status
+        }
     };
 
     let status_line = Line::from(Span::styled(

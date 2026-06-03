@@ -51,43 +51,88 @@ fn run() -> Result<()> {
     let mut current_page = 0;
     let mut should_quit = false;
 
+    // G 键跳转模式状态
+    let mut in_goto_mode = false;
+    let mut goto_buffer = String::new();
+
     while !should_quit {
-        // 将当前页数据、主题、页码传入 UI 模块
+        // 构建跳转输入提示（用于 UI 渲染）
+        let goto_input: Option<&str> = if in_goto_mode {
+            Some(goto_buffer.as_str())
+        } else {
+            None
+        };
+
+        // 将当前页数据、主题、页码、跳转状态传入 UI 模块
         terminal
             .draw(|f| {
-                ui::render(f, &slides[current_page], &theme_styles, current_page, total_pages);
+                ui::render(f, &slides[current_page], &theme_styles, current_page, total_pages, goto_input);
             })
             .map_err(|e| PrismError::TerminalError(e.to_string()))?;
 
         if event::poll(Duration::from_millis(100)).map_err(|e| PrismError::TerminalError(e.to_string()))? {
             if let Event::Key(key) = event::read().map_err(|e| PrismError::TerminalError(e.to_string()))? {
-                // 仅响应按下事件，过滤释放事件，防止部分终端双击触发
                 if key.kind == event::KeyEventKind::Press {
-                    match key.code {
-                        // 按 Q 或 ESC 键退出
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            should_quit = true;
-                        }
-                        // 按右方向键或空格，向后翻页
-                        KeyCode::Right | KeyCode::Char(' ') => {
-                            if current_page < total_pages - 1 {
-                                current_page += 1;
+                    // ── 跳转模式分支 ──
+                    if in_goto_mode {
+                        match key.code {
+                            KeyCode::Esc => {
+                                // 取消跳转
+                                in_goto_mode = false;
+                                goto_buffer.clear();
                             }
-                        }
-                        // 按左方向键，向前翻页
-                        KeyCode::Left => {
-                            if current_page > 0 {
-                                current_page -= 1;
+                            KeyCode::Enter => {
+                                // 确认跳转：解析数字并跳页
+                                if let Ok(target) = goto_buffer.parse::<usize>() {
+                                    // 用户输入为 1-based，转换为 0-based 并钳制
+                                    let page = if target == 0 {
+                                        0
+                                    } else {
+                                        (target - 1).min(total_pages - 1)
+                                    };
+                                    current_page = page;
+                                }
+                                in_goto_mode = false;
+                                goto_buffer.clear();
                             }
-                        }
-                        // 按 O 打开当前页图片（若存在）
-                        KeyCode::Char('o') | KeyCode::Char('O') => {
-                            let images = collect_slide_images(&slides[current_page]);
-                            if let Some(path) = images.first() {
-                                open_image(path)?;
+                            KeyCode::Backspace => {
+                                goto_buffer.pop();
                             }
+                            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                                goto_buffer.push(ch);
+                            }
+                            _ => {} // 忽略其他按键
                         }
-                        _ => {}
+                    } else {
+                        // ── 正常模式分支 ──
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                should_quit = true;
+                            }
+                            KeyCode::Right | KeyCode::Char(' ') => {
+                                if current_page < total_pages - 1 {
+                                    current_page += 1;
+                                }
+                            }
+                            KeyCode::Left => {
+                                if current_page > 0 {
+                                    current_page -= 1;
+                                }
+                            }
+                            // 按 G 键进入跳转模式
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                in_goto_mode = true;
+                                goto_buffer.clear();
+                            }
+                            // 按 O 打开当前页图片（若存在）
+                            KeyCode::Char('o') | KeyCode::Char('O') => {
+                                let images = collect_slide_images(&slides[current_page]);
+                                if let Some(path) = images.first() {
+                                    open_image(path)?;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
