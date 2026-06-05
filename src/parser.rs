@@ -23,6 +23,50 @@ impl InlineSpanCollector for Vec<TextSpan> {
     }
 }
 
+/// 纯文本收集器：丢弃所有格式标记，仅提取可读文字
+///
+/// 这是 `InlineSpanCollector` 的第二个实现者，证明 trait 泛型抽象的
+/// 实际价值。配合 `parse_inline_with` 可将任意 Markdown 行内文本
+/// 转为纯文本字符串，用于全文搜索、字数统计、纯文本导出等场景。
+#[derive(Debug, Clone, Default)]
+pub struct PlainTextCollector {
+    pub text: String,
+}
+
+impl PlainTextCollector {
+    pub fn into_string(self) -> String {
+        self.text
+    }
+}
+
+impl InlineSpanCollector for PlainTextCollector {
+    fn push_span(&mut self, span: TextSpan) {
+        match span {
+            TextSpan::Normal(t)
+            | TextSpan::Bold(t)
+            | TextSpan::Italic(t)
+            | TextSpan::BoldItalic(t)
+            | TextSpan::InlineCode(t) => {
+                self.text.push_str(&t);
+            }
+            TextSpan::Link { text, url } => {
+                if url.is_empty() {
+                    self.text.push_str(&text);
+                } else {
+                    self.text.push_str(&url);
+                }
+            }
+            TextSpan::Image { alt, src } => {
+                if alt.is_empty() {
+                    self.text.push_str(&src);
+                } else {
+                    self.text.push_str(&alt);
+                }
+            }
+        }
+    }
+}
+
 /// 幻灯片中的单一视觉元素枚举
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlideElement {
@@ -36,12 +80,26 @@ pub enum SlideElement {
     Paragraph(Vec<TextSpan>),
     /// 空行（用于在 TUI 渲染时保留物理排版间距）
     EmptyLine,
+    /// 演讲者备注（HTML 注释 <!-- ... -->，仅演讲者模式可见）
+    Note(String),
 }
 
 /// 单页幻灯片结构体
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slide {
     pub elements: Vec<SlideElement>,
+}
+
+/// 从幻灯片元素中提取所有演讲者备注文本
+pub fn collect_slide_notes(slide: &Slide) -> Vec<String> {
+    slide
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            SlideElement::Note(content) => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn collect_slide_images(slide: &Slide) -> Vec<String> {
@@ -53,7 +111,7 @@ pub fn collect_slide_images(slide: &Slide) -> Vec<String> {
             | SlideElement::Paragraph(spans) => {
                 collect_images_from_spans(spans, &mut images);
             }
-            SlideElement::CodeBlock(_) | SlideElement::EmptyLine => {}
+            SlideElement::CodeBlock(_) | SlideElement::EmptyLine | SlideElement::Note(_) => {}
         }
     }
     images
@@ -71,6 +129,10 @@ impl Parser {
         // 状态机标志：指示当前是否正处于一个多行代码块里面
         let mut in_code_block = false;
         let mut current_code_lines = Vec::new();
+
+        // 状态机标志：多行 HTML 备注解析
+        let mut in_note = false;
+        let mut current_note_lines = Vec::new();
 
         // 逐行流式扫描（带行号追踪，便于错误定位）
         for (line_number, line) in content.lines().enumerate() {
@@ -92,7 +154,26 @@ impl Parser {
                 continue;
             }
 
-            // 状态分支 2：遇到了幻灯片切页符 "---"
+            // 状态分支 2：如果正处于多行备注内部，收集行直到 -->
+            if in_note {
+                if let Some(end_pos) = trimmed.find("-->") {
+                    in_note = false;
+                    let note_line = trimmed[..end_pos].trim();
+                    if !note_line.is_empty() {
+                        current_note_lines.push(note_line.to_string());
+                    }
+                    let note_content = current_note_lines.join("\n").trim().to_string();
+                    if !note_content.is_empty() {
+                        current_elements.push(SlideElement::Note(note_content));
+                    }
+                    current_note_lines.clear();
+                } else {
+                    current_note_lines.push(line.to_string());
+                }
+                continue;
+            }
+
+            // 状态分支 3：遇到了幻灯片切页符 "---"
             if trimmed == "---" {
                 // 如果当前页已经收集了内容，将其打包存入幻灯片大集合，并清空当前页
                 if !current_elements.is_empty() {
@@ -102,7 +183,26 @@ impl Parser {
                 continue;
             }
 
-            // 状态分支 3：解析常规的 Markdown 语法行
+            // 检测 HTML 注释（演讲者备注）
+            if trimmed.starts_with("<!--") {
+                let inner = trimmed.trim_start_matches("<!--").trim();
+                if let Some(end_pos) = inner.rfind("-->") {
+                    // 单行备注：<!-- 内容 -->
+                    let note = inner[..end_pos].trim();
+                    if !note.is_empty() {
+                        current_elements.push(SlideElement::Note(note.to_string()));
+                    }
+                } else {
+                    // 多行备注开始
+                    in_note = true;
+                    if !inner.is_empty() {
+                        current_note_lines.push(inner.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // 状态分支 4：解析常规的 Markdown 语法行
             if trimmed.starts_with("```") {
                 // 触发代码块开启状态
                 in_code_block = true;
@@ -140,6 +240,15 @@ impl Parser {
             current_code_lines.clear();
         }
 
+        // 循环结束后，如果还在备注内，强制收尾
+        if in_note {
+            let note_content = current_note_lines.join("\n").trim().to_string();
+            if !note_content.is_empty() {
+                current_elements.push(SlideElement::Note(note_content));
+            }
+            current_note_lines.clear();
+        }
+
         // 循环结束后，如果最后一页有残留内容，塞进大集合
         if !current_elements.is_empty() {
             slides.push(Slide { elements: current_elements });
@@ -158,6 +267,15 @@ impl Parser {
 
 pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
     parse_inline_with::<Vec<TextSpan>>(text)
+}
+
+/// 将 Markdown 行内文本解析为纯文本（丢弃所有格式标记）
+///
+/// 这是 `PlainTextCollector` 的便利封装，复用同一套 `parse_inline_with`
+/// 泛型解析管线。
+pub fn parse_inline_to_plain(text: &str) -> String {
+    let collector = parse_inline_with::<PlainTextCollector>(text);
+    collector.into_string()
 }
 
 fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
@@ -783,6 +901,85 @@ mod tests {
         assert_eq!(result, vec![bold!("bold*")]);
     }
 
+    // ========== PlainTextCollector & parse_inline_to_plain 测试 ==========
+
+    #[test]
+    fn test_plain_text_normal() {
+        assert_eq!(parse_inline_to_plain("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_plain_text_empty() {
+        assert_eq!(parse_inline_to_plain(""), "");
+    }
+
+    #[test]
+    fn test_plain_text_bold_stripped() {
+        assert_eq!(parse_inline_to_plain("hello **world** foo"), "hello world foo");
+    }
+
+    #[test]
+    fn test_plain_text_italic_stripped() {
+        assert_eq!(parse_inline_to_plain("hello *world* foo"), "hello world foo");
+    }
+
+    #[test]
+    fn test_plain_text_bold_italic_stripped() {
+        assert_eq!(parse_inline_to_plain("a ***b*** c"), "a b c");
+    }
+
+    #[test]
+    fn test_plain_text_inline_code_stripped() {
+        assert_eq!(parse_inline_to_plain("use `println!` macro"), "use println! macro");
+    }
+
+    #[test]
+    fn test_plain_text_link_shows_url() {
+        let result = parse_inline_to_plain("visit [Prism](https://example.com) now");
+        assert_eq!(result, "visit https://example.com now");
+    }
+
+    #[test]
+    fn test_plain_text_link_empty_url_kept_literal() {
+        // 空 URL 不被识别为链接，原文保留
+        let result = parse_inline_to_plain("[text]()");
+        assert_eq!(result, "[text]()");
+    }
+
+    #[test]
+    fn test_plain_text_image_shows_alt() {
+        let result = parse_inline_to_plain("see ![logo](icon.png) here");
+        assert_eq!(result, "see logo here");
+    }
+
+    #[test]
+    fn test_plain_text_image_no_alt_shows_src() {
+        let result = parse_inline_to_plain("see ![](icon.png) here");
+        assert_eq!(result, "see icon.png here");
+    }
+
+    #[test]
+    fn test_plain_text_escaped_chars() {
+        // \* → *   \` → `
+        let result = parse_inline_to_plain(r"hello \*world\* foo");
+        assert_eq!(result, "hello *world* foo");
+    }
+
+    #[test]
+    fn test_plain_text_mixed_all() {
+        let result = parse_inline_to_plain(
+            "**bold** *italic* `code` [link](http://a.b) ![img](x.png) normal",
+        );
+        assert_eq!(result, "bold italic code http://a.b img normal");
+    }
+
+    #[test]
+    fn test_plain_text_unclosed_markers_kept() {
+        // 未闭合的标记符保留为普通文本
+        let result = parse_inline_to_plain("**unclosed");
+        assert_eq!(result, "**unclosed");
+    }
+
     // ========== Parser::parse (幻灯片解析) 测试 ==========
 
     #[test]
@@ -958,6 +1155,220 @@ mod tests {
         let slides = Parser::parse(content).unwrap();
         assert_eq!(slides.len(), 1);
         assert_eq!(slides[0].elements.len(), 3); // EmptyLine, Paragraph, EmptyLine
+    }
+
+    // ========== SlideElement::Note（演讲者备注）测试 ==========
+
+    #[test]
+    fn test_single_line_note() {
+        let content = "<!-- 这是备注 -->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].elements.len(), 1);
+        assert!(matches!(
+            slides[0].elements[0],
+            SlideElement::Note(ref s) if s == "这是备注"
+        ));
+    }
+
+    #[test]
+    fn test_single_line_note_with_extra_spaces() {
+        let content = "<!--   多余空格备注   -->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        assert!(matches!(
+            slides[0].elements[0],
+            SlideElement::Note(ref s) if s == "多余空格备注"
+        ));
+    }
+
+    #[test]
+    fn test_single_line_empty_note() {
+        // 空备注 <!-- --> 不生成 Note 元素；纯空备注文件视为无有效内容
+        let content = "<!-- -->";
+        let result = Parser::parse(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_note_skipped_within_slide() {
+        // 幻灯片中有其他内容时，空备注被跳过，不产生元素
+        let content = "# Title\n<!-- -->\n<!-- 有效备注 -->\n- item";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        // 4 个元素: Heading, Note(有效), ListItem (空备注被跳过)
+        // 注意：<!-- --> 和 <!-- 有效备注 --> 之间没有空行，所以不产生 EmptyLine
+        assert_eq!(slides[0].elements.len(), 3);
+        assert!(matches!(slides[0].elements[0], SlideElement::Heading(1, _)));
+        assert!(matches!(slides[0].elements[1], SlideElement::Note(_)));
+        assert!(matches!(slides[0].elements[2], SlideElement::ListItem(_)));
+    }
+
+    #[test]
+    fn test_multiline_note() {
+        let content = "<!--\n这是多行备注\n第二行\n第三行\n-->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].elements.len(), 1);
+        match &slides[0].elements[0] {
+            SlideElement::Note(text) => {
+                assert!(text.contains("这是多行备注"));
+                assert!(text.contains("第二行"));
+                assert!(text.contains("第三行"));
+            }
+            _ => panic!("Expected Note element"),
+        }
+    }
+
+    #[test]
+    fn test_multiline_note_inline_close() {
+        // 第一行开始，第二行直接带有 -->
+        let content = "<!-- 第一行内容\n第二行结束 -->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        match &slides[0].elements[0] {
+            SlideElement::Note(text) => {
+                assert!(text.contains("第一行内容"));
+                assert!(text.contains("第二行结束"));
+            }
+            _ => panic!("Expected Note element"),
+        }
+    }
+
+    #[test]
+    fn test_note_mixed_with_content() {
+        let content = "# 标题\n<!-- 标题备注 -->\n- 列表项\n<!-- 列表备注 -->\n正文";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        let elements = &slides[0].elements;
+        // 应有: Heading, Note, ListItem, Note, Paragraph = 5
+        assert_eq!(elements.len(), 5);
+        assert!(matches!(elements[0], SlideElement::Heading(1, _)));
+        assert!(matches!(elements[1], SlideElement::Note(_)));
+        assert!(matches!(elements[2], SlideElement::ListItem(_)));
+        assert!(matches!(elements[3], SlideElement::Note(_)));
+        assert!(matches!(elements[4], SlideElement::Paragraph(_)));
+    }
+
+    #[test]
+    fn test_note_preserved_across_slides() {
+        let content = "# S1\n<!-- S1备注 -->\n---\n# S2\n<!-- S2备注 -->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 2);
+        // 第一页有 Heading + Note
+        assert_eq!(slides[0].elements.len(), 2);
+        assert!(matches!(slides[0].elements[0], SlideElement::Heading(1, _)));
+        assert!(matches!(slides[0].elements[1], SlideElement::Note(_)));
+        // 第二页有 Heading + Note
+        assert_eq!(slides[1].elements.len(), 2);
+        assert!(matches!(slides[1].elements[0], SlideElement::Heading(1, _)));
+        assert!(matches!(slides[1].elements[1], SlideElement::Note(_)));
+    }
+
+    #[test]
+    fn test_note_not_created_in_code_block() {
+        // 代码块内的 <!-- 不视为备注
+        let content = "```\n<!-- 这不是备注 -->\n```";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        assert!(matches!(slides[0].elements[0], SlideElement::CodeBlock(_)));
+        if let SlideElement::CodeBlock(ref code) = slides[0].elements[0] {
+            assert!(code.contains("<!-- 这不是备注 -->"));
+        }
+    }
+
+    #[test]
+    fn test_unclosed_note_auto_close() {
+        // 未闭合的备注在文件末尾自动收尾
+        let content = "<!-- 未闭合的备注\n继续写\n最终也没有闭合";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        match &slides[0].elements[0] {
+            SlideElement::Note(text) => {
+                assert!(text.contains("未闭合的备注"));
+                assert!(text.contains("继续写"));
+                assert!(text.contains("最终也没有闭合"));
+            }
+            _ => panic!("Expected Note element"),
+        }
+    }
+
+    #[test]
+    fn test_note_with_markdown_formatting() {
+        // 备注内容可包含任意字符，内部 ** 等不产生格式
+        let content = "<!-- 使用 **加粗** 和 *斜体* 强调 -->";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 1);
+        match &slides[0].elements[0] {
+            SlideElement::Note(text) => {
+                assert!(text.contains("**加粗**"));
+                assert!(text.contains("*斜体*"));
+            }
+            _ => panic!("Expected Note element"),
+        }
+    }
+
+    #[test]
+    fn test_note_before_first_slide_separator() {
+        let content = "<!-- 全局备注 -->\n# Slide 1\n---\n# Slide 2";
+        let slides = Parser::parse(content).unwrap();
+        assert_eq!(slides.len(), 2);
+        // 第一页应有 Note + Heading
+        assert!(matches!(slides[0].elements[0], SlideElement::Note(_)));
+        assert!(matches!(slides[0].elements[1], SlideElement::Heading(1, _)));
+        // 第二页只有 Heading
+        assert_eq!(slides[1].elements.len(), 1);
+    }
+
+    // ========== collect_slide_notes 测试 ==========
+
+    #[test]
+    fn test_collect_notes_empty() {
+        let slide = Slide { elements: vec![] };
+        assert!(collect_slide_notes(&slide).is_empty());
+    }
+
+    #[test]
+    fn test_collect_notes_single() {
+        let slide = Slide {
+            elements: vec![
+                SlideElement::Heading(1, vec![]),
+                SlideElement::Note("备注内容".to_string()),
+                SlideElement::Paragraph(vec![]),
+            ],
+        };
+        let notes = collect_slide_notes(&slide);
+        assert_eq!(notes, vec!["备注内容"]);
+    }
+
+    #[test]
+    fn test_collect_notes_multiple() {
+        let slide = Slide {
+            elements: vec![
+                SlideElement::Note("第一条".to_string()),
+                SlideElement::Paragraph(vec![]),
+                SlideElement::Note("第二条".to_string()),
+                SlideElement::Note("第三条".to_string()),
+            ],
+        };
+        let notes = collect_slide_notes(&slide);
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[0], "第一条");
+        assert_eq!(notes[1], "第二条");
+        assert_eq!(notes[2], "第三条");
+    }
+
+    #[test]
+    fn test_collect_notes_no_notes_present() {
+        let slide = Slide {
+            elements: vec![
+                SlideElement::Heading(1, vec![]),
+                SlideElement::Paragraph(vec![]),
+                SlideElement::CodeBlock("code".to_string()),
+                SlideElement::EmptyLine,
+            ],
+        };
+        assert!(collect_slide_notes(&slide).is_empty());
     }
 
     // ========== collect_slide_images 测试 ==========

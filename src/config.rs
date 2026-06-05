@@ -15,6 +15,10 @@ pub struct Config {
     /// 可选参数：演示界面主题（如 default, matrix, dracula），默认使用 default
     #[arg(short, long, default_value = "default")]
     pub theme: String,
+
+    /// 开启演讲者模式：右侧小抄面板 + 实时计时器
+    #[arg(long, default_value_t = false)]
+    pub presenter: bool,
 }
 
 impl Config {

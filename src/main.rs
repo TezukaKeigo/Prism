@@ -5,7 +5,7 @@ mod theme;
 mod ui;
 
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::process::Command;
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -16,7 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::config::Config;
 use crate::error::{PrismError, Result};
-use crate::parser::{Parser, collect_slide_images};
+use crate::parser::{Parser, collect_slide_images, collect_slide_notes};
 use crate::theme::ThemeStyles;
 
 fn main() {
@@ -55,7 +55,14 @@ fn run() -> Result<()> {
     let mut in_goto_mode = false;
     let mut goto_buffer = String::new();
 
+    // 演讲计时器起点
+    let start_time = Instant::now();
+    let presenter = config.presenter;
+
     while !should_quit {
+        // 计算实时经过时长
+        let elapsed = start_time.elapsed();
+
         // 构建跳转输入提示（用于 UI 渲染）
         let goto_input: Option<&str> = if in_goto_mode {
             Some(goto_buffer.as_str())
@@ -63,10 +70,27 @@ fn run() -> Result<()> {
             None
         };
 
-        // 将当前页数据、主题、页码、跳转状态传入 UI 模块
+        // 演讲者模式：提取当前页备注
+        let slide_notes: Option<Vec<String>> = if presenter {
+            let notes = collect_slide_notes(&slides[current_page]);
+            Some(notes)
+        } else {
+            None
+        };
+
+        // 将当前页数据、主题、页码、跳转状态、计时、备注传入 UI 模块
         terminal
             .draw(|f| {
-                ui::render(f, &slides[current_page], &theme_styles, current_page, total_pages, goto_input);
+                ui::render(
+                    f,
+                    &slides[current_page],
+                    &theme_styles,
+                    current_page,
+                    total_pages,
+                    goto_input,
+                    elapsed,
+                    slide_notes.as_deref(),
+                );
             })
             .map_err(|e| PrismError::TerminalError(e.to_string()))?;
 

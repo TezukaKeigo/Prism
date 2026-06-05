@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Style, Modifier, Color},
@@ -248,6 +250,78 @@ fn wrap_with_prefix(
     lines
 }
 
+/// 将 Duration 格式化为 HH:MM:SS
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
+    }
+}
+
+/// 渲染演讲者右侧小抄面板（计时器 + 备注列表）
+fn render_presenter_panel(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    notes: &[String],
+    elapsed: Duration,
+    theme: &ThemeStyles,
+) {
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_color))
+        .title(" 演讲者小抄 ")
+        .title_alignment(ratatui::layout::Alignment::Center)
+        .style(Style::default().bg(theme.bg_color));
+
+    let inner = panel_block.inner(area);
+    f.render_widget(panel_block, area);
+
+    let panel_width = inner.width as usize;
+    let mut lines = Vec::new();
+
+    // 计时器行
+    let timer_text = format!(" ⏱  {}", format_duration(elapsed));
+    lines.push(Line::from(Span::styled(
+        timer_text,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        " ──────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::default());
+
+    // 备注内容
+    if notes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " （无备注）",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for note in notes {
+            // 每条备注用 parse_inline + wrap_spans 排版
+            let spans = parse_inline(note);
+            for line_parts in wrap_spans(&spans, panel_width.saturating_sub(2)) {
+                lines.push(Line::from(build_rich_spans(
+                    &line_parts,
+                    Style::default().fg(theme.paragraph_style.fg.unwrap_or(Color::White)),
+                )));
+            }
+            // 备注之间留空行
+            lines.push(Line::default());
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // ═══════════════════════════════════════════════════════════════
 
 /// TUI 视觉渲染中心总入口
@@ -258,6 +332,8 @@ pub fn render(
     current_page: usize,
     total_pages: usize,
     goto_input: Option<&str>,
+    elapsed: Duration,
+    presenter_notes: Option<&[String]>,
 ) {
     // 1. 铺满整屏背景色
     let full_area = f.size();
@@ -273,7 +349,20 @@ pub fn render(
         ])
         .split(full_area);
 
-    // 3. 渲染主舞台大外框
+    // 3. 根据是否有演讲者模式，决定内容区是否需要左右分栏
+    let is_presenter = presenter_notes.is_some();
+
+    let (slide_area, note_area) = if is_presenter {
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(chunks[0]);
+        (h_chunks[0], Some(h_chunks[1]))
+    } else {
+        (chunks[0], None)
+    };
+
+    // 渲染主舞台大外框
     let main_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_color))
@@ -281,8 +370,8 @@ pub fn render(
         .title_alignment(ratatui::layout::Alignment::Center)
         .style(Style::default().bg(theme.bg_color));
 
-    let inner_area = main_block.inner(chunks[0]);
-    f.render_widget(main_block, chunks[0]);
+    let inner_area = main_block.inner(slide_area);
+    f.render_widget(main_block, slide_area);
 
     // 4. 排版控制：逐元素构建 display_lines
     let mut display_lines = Vec::new();
@@ -378,11 +467,20 @@ pub fn render(
             SlideElement::EmptyLine => {
                 display_lines.push(Line::default());
             }
+
+            SlideElement::Note(_) => {
+                // 备注不在主舞台显示，演讲者模式下由右侧面板渲染
+            }
         }
     }
 
     let content_paragraph = Paragraph::new(display_lines);
     f.render_widget(content_paragraph, inner_area);
+
+    // 4b. 演讲者模式：渲染右侧小抄面板
+    if let (Some(area), Some(notes)) = (note_area, presenter_notes) {
+        render_presenter_panel(f, area, notes, elapsed, theme);
+    }
 
     // 5. 渲染底部状态栏（跳转模式覆盖常规提示）
     let status_string = if let Some(input) = goto_input {
@@ -424,4 +522,49 @@ pub fn render(
         Paragraph::new(status_line).alignment(ratatui::layout::Alignment::Center),
         chunks[1],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== format_duration 测试 ==========
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "00:00");
+    }
+
+    #[test]
+    fn test_format_duration_seconds_only() {
+        assert_eq!(format_duration(Duration::from_secs(7)), "00:07");
+        assert_eq!(format_duration(Duration::from_secs(42)), "00:42");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_and_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(65)), "01:05");
+        assert_eq!(format_duration(Duration::from_secs(125)), "02:05");
+        assert_eq!(format_duration(Duration::from_secs(599)), "09:59");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59:59");
+    }
+
+    #[test]
+    fn test_format_duration_exactly_one_hour() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1:00:00");
+    }
+
+    #[test]
+    fn test_format_duration_hours_minutes_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1:01:01");
+        assert_eq!(format_duration(Duration::from_secs(3725)), "1:02:05");
+        assert_eq!(format_duration(Duration::from_secs(7200)), "2:00:00");
+        assert_eq!(format_duration(Duration::from_secs(7384)), "2:03:04");
+    }
+
+    #[test]
+    fn test_format_duration_large_hours() {
+        assert_eq!(format_duration(Duration::from_secs(36000)), "10:00:00");
+        assert_eq!(format_duration(Duration::from_secs(36610)), "10:10:10");
+    }
 }
