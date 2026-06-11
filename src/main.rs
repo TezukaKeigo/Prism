@@ -4,15 +4,15 @@ mod parser;
 mod theme;
 mod ui;
 
-use std::fs;
-use std::time::{Duration, Instant};
-use std::process::Command;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::fs;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::{PrismError, Result};
@@ -44,8 +44,11 @@ fn run() -> Result<()> {
     let _guard = TerminalGuard;
 
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).map_err(|e| PrismError::TerminalError(e.to_string()))?;
-    terminal.clear().map_err(|e| PrismError::TerminalError(e.to_string()))?;
+    let mut terminal =
+        Terminal::new(backend).map_err(|e| PrismError::TerminalError(e.to_string()))?;
+    terminal
+        .clear()
+        .map_err(|e| PrismError::TerminalError(e.to_string()))?;
 
     // 4. 播放主循环
     let mut current_page = 0;
@@ -79,85 +82,85 @@ fn run() -> Result<()> {
         };
 
         // 将当前页数据、主题、页码、跳转状态、计时、备注传入 UI 模块
+        let render_ctx = ui::RenderContext {
+            slide: &slides[current_page],
+            theme: &theme_styles,
+            current_page,
+            total_pages,
+            goto_input,
+            elapsed,
+            presenter_notes: slide_notes.as_deref(),
+        };
+
         terminal
             .draw(|f| {
-                ui::render(
-                    f,
-                    &slides[current_page],
-                    &theme_styles,
-                    current_page,
-                    total_pages,
-                    goto_input,
-                    elapsed,
-                    slide_notes.as_deref(),
-                );
+                ui::render(f, &render_ctx);
             })
             .map_err(|e| PrismError::TerminalError(e.to_string()))?;
 
-        if event::poll(Duration::from_millis(100)).map_err(|e| PrismError::TerminalError(e.to_string()))? {
-            if let Event::Key(key) = event::read().map_err(|e| PrismError::TerminalError(e.to_string()))? {
-                if key.kind == event::KeyEventKind::Press {
-                    // ── 跳转模式分支 ──
-                    if in_goto_mode {
-                        match key.code {
-                            KeyCode::Esc => {
-                                // 取消跳转
-                                in_goto_mode = false;
-                                goto_buffer.clear();
-                            }
-                            KeyCode::Enter => {
-                                // 确认跳转：解析数字并跳页
-                                if let Ok(target) = goto_buffer.parse::<usize>() {
-                                    // 用户输入为 1-based，转换为 0-based 并钳制
-                                    let page = if target == 0 {
-                                        0
-                                    } else {
-                                        (target - 1).min(total_pages - 1)
-                                    };
-                                    current_page = page;
-                                }
-                                in_goto_mode = false;
-                                goto_buffer.clear();
-                            }
-                            KeyCode::Backspace => {
-                                goto_buffer.pop();
-                            }
-                            KeyCode::Char(ch) if ch.is_ascii_digit() => {
-                                goto_buffer.push(ch);
-                            }
-                            _ => {} // 忽略其他按键
+        if event::poll(Duration::from_millis(100))
+            .map_err(|e| PrismError::TerminalError(e.to_string()))?
+            && let Event::Key(key) =
+                event::read().map_err(|e| PrismError::TerminalError(e.to_string()))?
+            && key.kind == event::KeyEventKind::Press
+        {
+            // ── 跳转模式分支 ──
+            if in_goto_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        // 取消跳转
+                        in_goto_mode = false;
+                        goto_buffer.clear();
+                    }
+                    KeyCode::Enter => {
+                        // 确认跳转：解析数字并跳页
+                        if let Ok(target) = goto_buffer.parse::<usize>() {
+                            // 用户输入为 1-based，转换为 0-based 并钳制
+                            let page = if target == 0 {
+                                0
+                            } else {
+                                (target - 1).min(total_pages - 1)
+                            };
+                            current_page = page;
                         }
-                    } else {
-                        // ── 正常模式分支 ──
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => {
-                                should_quit = true;
-                            }
-                            KeyCode::Right | KeyCode::Char(' ') => {
-                                if current_page < total_pages - 1 {
-                                    current_page += 1;
-                                }
-                            }
-                            KeyCode::Left => {
-                                if current_page > 0 {
-                                    current_page -= 1;
-                                }
-                            }
-                            // 按 G 键进入跳转模式
-                            KeyCode::Char('g') | KeyCode::Char('G') => {
-                                in_goto_mode = true;
-                                goto_buffer.clear();
-                            }
-                            // 按 O 打开当前页图片（若存在）
-                            KeyCode::Char('o') | KeyCode::Char('O') => {
-                                let images = collect_slide_images(&slides[current_page]);
-                                if let Some(path) = images.first() {
-                                    open_image(path)?;
-                                }
-                            }
-                            _ => {}
+                        in_goto_mode = false;
+                        goto_buffer.clear();
+                    }
+                    KeyCode::Backspace => {
+                        goto_buffer.pop();
+                    }
+                    KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                        goto_buffer.push(ch);
+                    }
+                    _ => {} // 忽略其他按键
+                }
+            } else {
+                // ── 正常模式分支 ──
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        should_quit = true;
+                    }
+                    KeyCode::Right | KeyCode::Char(' ') => {
+                        if current_page < total_pages - 1 {
+                            current_page += 1;
                         }
                     }
+                    KeyCode::Left => {
+                        current_page = current_page.saturating_sub(1);
+                    }
+                    // 按 G 键进入跳转模式
+                    KeyCode::Char('g') | KeyCode::Char('G') => {
+                        in_goto_mode = true;
+                        goto_buffer.clear();
+                    }
+                    // 按 O 打开当前页图片（若存在）
+                    KeyCode::Char('o') | KeyCode::Char('O') => {
+                        let images = collect_slide_images(&slides[current_page]);
+                        if let Some(path) = images.first() {
+                            open_image(path)?;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -168,7 +171,7 @@ fn run() -> Result<()> {
 
 fn open_image(path: &str) -> Result<()> {
     let full_path = std::env::current_dir()
-        .map_err(|e| PrismError::IoError(e))?
+        .map_err(PrismError::IoError)?
         .join(path);
     if !full_path.exists() {
         return Err(PrismError::IoError(std::io::Error::new(
@@ -180,7 +183,7 @@ fn open_image(path: &str) -> Result<()> {
     Command::new("cmd")
         .args(["/C", "start", "", &full_path.to_string_lossy()])
         .spawn()
-        .map_err(|e| PrismError::IoError(e))?;
+        .map_err(PrismError::IoError)?;
 
     Ok(())
 }

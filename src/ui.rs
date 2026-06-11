@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    style::{Style, Modifier, Color},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-    Frame,
-};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::parser::{Slide, SlideElement, TextSpan, parse_inline};
 use crate::theme::ThemeStyles;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // ═══════════════════════════════════════════════════════════════
 // 排版与渲染辅助类型/函数（从 render() 闭包中提取）
@@ -91,10 +91,16 @@ fn build_rich_spans(parts: &[(SpanKind, String)], base_style: Style) -> Vec<Span
                 out.push(Span::styled(text.clone(), base_style));
             }
             SpanKind::Bold => {
-                out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::BOLD)));
+                out.push(Span::styled(
+                    text.clone(),
+                    base_style.add_modifier(Modifier::BOLD),
+                ));
             }
             SpanKind::Italic => {
-                out.push(Span::styled(text.clone(), base_style.add_modifier(Modifier::ITALIC)));
+                out.push(Span::styled(
+                    text.clone(),
+                    base_style.add_modifier(Modifier::ITALIC),
+                ));
             }
             SpanKind::BoldItalic => {
                 out.push(Span::styled(
@@ -141,7 +147,9 @@ fn build_rich_spans(parts: &[(SpanKind, String)], base_style: Style) -> Vec<Span
                                 out.push(Span::styled(inner_text, code_base));
                             }
                         }
-                        TextSpan::Link { text: link_text, .. } => {
+                        TextSpan::Link {
+                            text: link_text, ..
+                        } => {
                             if !link_text.is_empty() {
                                 out.push(Span::styled(link_text, code_base));
                             }
@@ -225,8 +233,7 @@ fn wrap_with_prefix(
         let mut chunk = String::new();
         for ch in text.chars() {
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if used + ch_width > max_width
-                && used > if is_first { first_width } else { cont_width }
+            if used + ch_width > max_width && used > if is_first { first_width } else { cont_width }
             {
                 if !chunk.is_empty() {
                     current.push((kind.clone(), std::mem::take(&mut chunk)));
@@ -324,33 +331,32 @@ fn render_presenter_panel(
 
 // ═══════════════════════════════════════════════════════════════
 
+/// 渲染上下文：将 `render()` 的 7 个配置参数收拢为单一结构体
+pub struct RenderContext<'a> {
+    pub slide: &'a Slide,
+    pub theme: &'a ThemeStyles,
+    pub current_page: usize,
+    pub total_pages: usize,
+    pub goto_input: Option<&'a str>,
+    pub elapsed: Duration,
+    pub presenter_notes: Option<&'a [String]>,
+}
+
 /// TUI 视觉渲染中心总入口
-pub fn render(
-    f: &mut Frame,
-    slide: &Slide,
-    theme: &ThemeStyles,
-    current_page: usize,
-    total_pages: usize,
-    goto_input: Option<&str>,
-    elapsed: Duration,
-    presenter_notes: Option<&[String]>,
-) {
+pub fn render(f: &mut Frame, ctx: &RenderContext<'_>) {
     // 1. 铺满整屏背景色
     let full_area = f.size();
-    let bg_block = Block::default().style(Style::default().bg(theme.bg_color));
+    let bg_block = Block::default().style(Style::default().bg(ctx.theme.bg_color));
     f.render_widget(bg_block, full_area);
 
     // 2. 运用网格布局切分为主舞台和底部
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(full_area);
 
     // 3. 根据是否有演讲者模式，决定内容区是否需要左右分栏
-    let is_presenter = presenter_notes.is_some();
+    let is_presenter = ctx.presenter_notes.is_some();
 
     let (slide_area, note_area) = if is_presenter {
         let h_chunks = Layout::default()
@@ -365,10 +371,14 @@ pub fn render(
     // 渲染主舞台大外框
     let main_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_color))
-        .title(format!(" Prism Presentation | 第 {}/{} 页 ", current_page + 1, total_pages))
+        .border_style(Style::default().fg(ctx.theme.border_color))
+        .title(format!(
+            " Prism Presentation | 第 {}/{} 页 ",
+            ctx.current_page + 1,
+            ctx.total_pages,
+        ))
         .title_alignment(ratatui::layout::Alignment::Center)
-        .style(Style::default().bg(theme.bg_color));
+        .style(Style::default().bg(ctx.theme.bg_color));
 
     let inner_area = main_block.inner(slide_area);
     f.render_widget(main_block, slide_area);
@@ -379,14 +389,17 @@ pub fn render(
 
     let max_line_width = inner_area.width as usize;
 
-    for element in &slide.elements {
+    for element in &ctx.slide.elements {
         match element {
             SlideElement::Heading(level, spans) => {
                 let heading_style = match level {
-                    1 => theme.heading_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                    2 => theme.heading_style.add_modifier(Modifier::BOLD),
-                    3..=6 => theme.heading_style,
-                    _ => theme.heading_style,
+                    1 => ctx
+                        .theme
+                        .heading_style
+                        .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                    2 => ctx.theme.heading_style.add_modifier(Modifier::BOLD),
+                    3..=6 => ctx.theme.heading_style,
+                    _ => ctx.theme.heading_style,
                 };
                 let indent = match level {
                     1 | 2 => "",
@@ -396,7 +409,8 @@ pub fn render(
                     6 => "        ",
                     _ => "        ",
                 };
-                for (prefix, line_parts) in wrap_with_prefix(spans, indent, indent, max_line_width) {
+                for (prefix, line_parts) in wrap_with_prefix(spans, indent, indent, max_line_width)
+                {
                     let mut line_spans = Vec::new();
                     if !prefix.is_empty() {
                         line_spans.push(Span::styled(prefix, heading_style));
@@ -411,16 +425,18 @@ pub fn render(
                 let wrapped = wrap_with_prefix(spans, "  • ", "    ", max_line_width);
                 for (prefix, line_parts) in wrapped {
                     let mut line_spans = Vec::new();
-                    line_spans.push(Span::styled(prefix, theme.list_style));
-                    line_spans.extend(build_rich_spans(&line_parts, theme.paragraph_style));
+                    line_spans.push(Span::styled(prefix, ctx.theme.list_style));
+                    line_spans.extend(build_rich_spans(&line_parts, ctx.theme.paragraph_style));
                     display_lines.push(Line::from(line_spans));
                 }
             }
 
             SlideElement::Paragraph(spans) => {
                 for line_parts in wrap_spans(spans, max_line_width) {
-                    display_lines
-                        .push(Line::from(build_rich_spans(&line_parts, theme.paragraph_style)));
+                    display_lines.push(Line::from(build_rich_spans(
+                        &line_parts,
+                        ctx.theme.paragraph_style,
+                    )));
                 }
             }
 
@@ -434,7 +450,7 @@ pub fn render(
 
                 // 代码框天花板 ┌──────────┐
                 let top_border = format!("  ┌{}┐", "─".repeat(box_width - 2));
-                display_lines.push(Line::from(Span::styled(top_border, theme.code_style)));
+                display_lines.push(Line::from(Span::styled(top_border, ctx.theme.code_style)));
 
                 // 逐行填入，两侧 │ 包裹，右侧空格补齐
                 for code_line in code.lines() {
@@ -444,22 +460,23 @@ pub fn render(
                         let padding_size = (box_width - 4).saturating_sub(content_width);
 
                         let mut line_spans = Vec::new();
-                        line_spans.push(Span::styled("  │ ", theme.code_style));
-                        line_spans.extend(build_rich_spans(&line_parts, theme.code_style));
+                        line_spans.push(Span::styled("  │ ", ctx.theme.code_style));
+                        line_spans.extend(build_rich_spans(&line_parts, ctx.theme.code_style));
                         if padding_size > 0 {
-                            line_spans.push(Span::styled(
-                                " ".repeat(padding_size),
-                                theme.code_style,
-                            ));
+                            line_spans
+                                .push(Span::styled(" ".repeat(padding_size), ctx.theme.code_style));
                         }
-                        line_spans.push(Span::styled(" │", theme.code_style));
+                        line_spans.push(Span::styled(" │", ctx.theme.code_style));
                         display_lines.push(Line::from(line_spans));
                     }
                 }
 
                 // 代码框地板 └──────────┘
                 let bottom_border = format!("  └{}┘", "─".repeat(box_width - 2));
-                display_lines.push(Line::from(Span::styled(bottom_border, theme.code_style)));
+                display_lines.push(Line::from(Span::styled(
+                    bottom_border,
+                    ctx.theme.code_style,
+                )));
 
                 display_lines.push(Line::default());
             }
@@ -478,20 +495,19 @@ pub fn render(
     f.render_widget(content_paragraph, inner_area);
 
     // 4b. 演讲者模式：渲染右侧小抄面板
-    if let (Some(area), Some(notes)) = (note_area, presenter_notes) {
-        render_presenter_panel(f, area, notes, elapsed, theme);
+    if let (Some(area), Some(notes)) = (note_area, ctx.presenter_notes) {
+        render_presenter_panel(f, area, notes, ctx.elapsed, ctx.theme);
     }
 
     // 5. 渲染底部状态栏（跳转模式覆盖常规提示）
-    let status_string = if let Some(input) = goto_input {
-        let prompt = if input.is_empty() {
+    let status_string = if let Some(input) = ctx.goto_input {
+        if input.is_empty() {
             " 跳转到: _  (输入页码后按 Enter，Esc 取消)".to_string()
         } else {
             format!(" 跳转到: {}_  (Enter 确认，Esc 取消)", input)
-        };
-        prompt
+        }
     } else {
-        let progress = (current_page + 1) as f32 / total_pages as f32;
+        let progress = (ctx.current_page + 1) as f32 / ctx.total_pages as f32;
         let bar_width = 25;
         let filled_width = (progress * bar_width as f32).round() as usize;
 
@@ -515,7 +531,9 @@ pub fn render(
 
     let status_line = Line::from(Span::styled(
         status_string,
-        Style::default().fg(theme.border_color).bg(theme.bg_color),
+        Style::default()
+            .fg(ctx.theme.border_color)
+            .bg(ctx.theme.bg_color),
     ));
 
     f.render_widget(

@@ -1,6 +1,6 @@
+use crate::error::{PrismError, Result};
 use clap::Parser;
 use std::path::PathBuf;
-use crate::error::{PrismError, Result};
 
 /// 命令行参数解析结构体
 #[derive(Parser, Debug)]

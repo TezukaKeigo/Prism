@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Prism 项目的专属错误枚举
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum PrismError {
     /// 找不到指定的 Markdown 文件，或者读取失败
     IoError(std::io::Error),

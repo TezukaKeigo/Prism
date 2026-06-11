@@ -29,11 +29,13 @@ impl InlineSpanCollector for Vec<TextSpan> {
 /// 实际价值。配合 `parse_inline_with` 可将任意 Markdown 行内文本
 /// 转为纯文本字符串，用于全文搜索、字数统计、纯文本导出等场景。
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct PlainTextCollector {
     pub text: String,
 }
 
 impl PlainTextCollector {
+    #[allow(dead_code)]
     pub fn into_string(self) -> String {
         self.text
     }
@@ -177,7 +179,9 @@ impl Parser {
             if trimmed == "---" {
                 // 如果当前页已经收集了内容，将其打包存入幻灯片大集合，并清空当前页
                 if !current_elements.is_empty() {
-                    slides.push(Slide { elements: current_elements });
+                    slides.push(Slide {
+                        elements: current_elements,
+                    });
                     current_elements = Vec::new();
                 }
                 continue;
@@ -210,13 +214,20 @@ impl Parser {
                 // 计算 # 的数量从而确定标题级别
                 let mut level = 0;
                 for ch in line.chars() {
-                    if ch == '#' { level += 1; } else { break; }
+                    if ch == '#' {
+                        level += 1;
+                    } else {
+                        break;
+                    }
                 }
 
                 let content_part = line.trim_start_matches('#');
                 // 严格标准：# 后面必须有一个空格才算合法标题，且级别不超过 6
                 if content_part.starts_with(' ') && level <= 6 {
-                    current_elements.push(SlideElement::Heading(level as u8, parse_inline(content_part.trim())));
+                    current_elements.push(SlideElement::Heading(
+                        level as u8,
+                        parse_inline(content_part.trim()),
+                    ));
                 } else {
                     current_elements.push(SlideElement::Paragraph(parse_inline(line)));
                 }
@@ -251,7 +262,9 @@ impl Parser {
 
         // 循环结束后，如果最后一页有残留内容，塞进大集合
         if !current_elements.is_empty() {
-            slides.push(Slide { elements: current_elements });
+            slides.push(Slide {
+                elements: current_elements,
+            });
         }
 
         if slides.is_empty() {
@@ -273,6 +286,7 @@ pub(crate) fn parse_inline(text: &str) -> Vec<TextSpan> {
 ///
 /// 这是 `PlainTextCollector` 的便利封装，复用同一套 `parse_inline_with`
 /// 泛型解析管线。
+#[allow(dead_code)]
 pub fn parse_inline_to_plain(text: &str) -> String {
     let collector = parse_inline_with::<PlainTextCollector>(text);
     collector.into_string()
@@ -288,40 +302,37 @@ fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
         let ch = chars[i];
 
         if ch == '\\' {
-            if let Some(next) = chars.get(i + 1) {
-                if is_escaped_char(*next) {
-                    buffer.push(*next);
-                    i += 2;
-                    continue;
-                }
+            if let Some(next) = chars.get(i + 1)
+                && is_escaped_char(*next)
+            {
+                buffer.push(*next);
+                i += 2;
+                continue;
             }
             buffer.push('\\');
             i += 1;
             continue;
         }
 
-        if ch == '!' {
-            if chars.get(i + 1) == Some(&'[') {
-                if let Some((alt, src, end)) = parse_link_like(&chars, i + 1) {
-                    if !src.is_empty() {
-                        flush_normal(&mut spans, &mut buffer);
-                        spans.push_span(TextSpan::Image { alt, src });
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
+        if ch == '!'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some((alt, src, end)) = parse_link_like(&chars, i + 1)
+            && !src.is_empty()
+        {
+            flush_normal(&mut spans, &mut buffer);
+            spans.push_span(TextSpan::Image { alt, src });
+            i = end + 1;
+            continue;
         }
 
-        if ch == '[' {
-            if let Some((text, url, end)) = parse_link_like(&chars, i) {
-                if !url.is_empty() {
-                    flush_normal(&mut spans, &mut buffer);
-                    spans.push_span(TextSpan::Link { text, url });
-                    i = end + 1;
-                    continue;
-                }
-            }
+        if ch == '['
+            && let Some((text, url, end)) = parse_link_like(&chars, i)
+            && !url.is_empty()
+        {
+            flush_normal(&mut spans, &mut buffer);
+            spans.push_span(TextSpan::Link { text, url });
+            i = end + 1;
+            continue;
         }
 
         if ch == '`' {
@@ -332,18 +343,17 @@ fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
                 continue;
             }
 
-            if is_single_backtick(&chars, i) {
-                if let Some(end) = find_closing_backtick(&chars, i + 1) {
-                    if end > i + 1 {
-                        let inner = &chars[i + 1..end];
-                        if has_non_whitespace(inner) {
-                            flush_normal(&mut spans, &mut buffer);
-                            let content: String = inner.iter().collect();
-                            spans.push_span(TextSpan::InlineCode(content));
-                            i = end + 1;
-                            continue;
-                        }
-                    }
+            if is_single_backtick(&chars, i)
+                && let Some(end) = find_closing_backtick(&chars, i + 1)
+                && end > i + 1
+            {
+                let inner = &chars[i + 1..end];
+                if has_non_whitespace(inner) {
+                    flush_normal(&mut spans, &mut buffer);
+                    let content: String = inner.iter().collect();
+                    spans.push_span(TextSpan::InlineCode(content));
+                    i = end + 1;
+                    continue;
                 }
             }
 
@@ -354,19 +364,19 @@ fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
 
         if ch == '*' {
             if i + 1 < chars.len() && chars[i + 1] == '*' {
-                if let Some(end) = find_closing(&chars, i + 2, "**") {
-                    if end > i + 2 {
-                        let inner = &chars[i + 2..end];
-                        if has_non_whitespace(inner) {
-                            flush_normal(&mut spans, &mut buffer);
-                            let inner_text: String = inner.iter().collect();
-                            let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
-                            for span in apply_bold(inner_spans) {
-                                spans.push_span(span);
-                            }
-                            i = end + 2;
-                            continue;
+                if let Some(end) = find_closing(&chars, i + 2, "**")
+                    && end > i + 2
+                {
+                    let inner = &chars[i + 2..end];
+                    if has_non_whitespace(inner) {
+                        flush_normal(&mut spans, &mut buffer);
+                        let inner_text: String = inner.iter().collect();
+                        let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
+                        for span in apply_bold(inner_spans) {
+                            spans.push_span(span);
                         }
+                        i = end + 2;
+                        continue;
                     }
                 }
 
@@ -376,19 +386,19 @@ fn parse_inline_with<C: InlineSpanCollector + Default>(text: &str) -> C {
                 continue;
             }
 
-            if let Some(end) = find_closing(&chars, i + 1, "*") {
-                if end > i + 1 {
-                    let inner = &chars[i + 1..end];
-                    if has_non_whitespace(inner) {
-                        flush_normal(&mut spans, &mut buffer);
-                        let inner_text: String = inner.iter().collect();
-                        let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
-                        for span in apply_italic(inner_spans) {
-                            spans.push_span(span);
-                        }
-                        i = end + 1;
-                        continue;
+            if let Some(end) = find_closing(&chars, i + 1, "*")
+                && end > i + 1
+            {
+                let inner = &chars[i + 1..end];
+                if has_non_whitespace(inner) {
+                    flush_normal(&mut spans, &mut buffer);
+                    let inner_text: String = inner.iter().collect();
+                    let inner_spans = parse_inline_with::<Vec<TextSpan>>(&inner_text);
+                    for span in apply_italic(inner_spans) {
+                        spans.push_span(span);
                     }
+                    i = end + 1;
+                    continue;
                 }
             }
 
@@ -915,12 +925,18 @@ mod tests {
 
     #[test]
     fn test_plain_text_bold_stripped() {
-        assert_eq!(parse_inline_to_plain("hello **world** foo"), "hello world foo");
+        assert_eq!(
+            parse_inline_to_plain("hello **world** foo"),
+            "hello world foo"
+        );
     }
 
     #[test]
     fn test_plain_text_italic_stripped() {
-        assert_eq!(parse_inline_to_plain("hello *world* foo"), "hello world foo");
+        assert_eq!(
+            parse_inline_to_plain("hello *world* foo"),
+            "hello world foo"
+        );
     }
 
     #[test]
@@ -930,7 +946,10 @@ mod tests {
 
     #[test]
     fn test_plain_text_inline_code_stripped() {
-        assert_eq!(parse_inline_to_plain("use `println!` macro"), "use println! macro");
+        assert_eq!(
+            parse_inline_to_plain("use `println!` macro"),
+            "use println! macro"
+        );
     }
 
     #[test]
@@ -1039,10 +1058,7 @@ mod tests {
         let content = "#no-space";
         let slides = Parser::parse(content).unwrap();
         assert_eq!(slides.len(), 1);
-        assert!(matches!(
-            slides[0].elements[0],
-            SlideElement::Paragraph(_)
-        ));
+        assert!(matches!(slides[0].elements[0], SlideElement::Paragraph(_)));
     }
 
     #[test]
@@ -1051,10 +1067,7 @@ mod tests {
         let content = "####### too deep";
         let slides = Parser::parse(content).unwrap();
         assert_eq!(slides.len(), 1);
-        assert!(matches!(
-            slides[0].elements[0],
-            SlideElement::Paragraph(_)
-        ));
+        assert!(matches!(slides[0].elements[0], SlideElement::Paragraph(_)));
     }
 
     #[test]
@@ -1122,10 +1135,7 @@ mod tests {
         let slides = Parser::parse(content).unwrap();
         assert_eq!(slides.len(), 2);
         // 确保最后一页被正确打包
-        assert!(matches!(
-            slides[1].elements[0],
-            SlideElement::Heading(1, _)
-        ));
+        assert!(matches!(slides[1].elements[0], SlideElement::Heading(1, _)));
     }
 
     #[test]
